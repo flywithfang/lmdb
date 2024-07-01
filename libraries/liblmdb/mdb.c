@@ -3202,8 +3202,7 @@ mdb_txn_renew(MDB_txn *txn)
 	return rc;
 }
 
-int
-mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
+int mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
 {
 	MDB_txn *txn;
 	MDB_ntxn *ntxn;
@@ -6851,9 +6850,7 @@ mdb_node_read(MDB_cursor *mc, MDB_node *leaf, MDB_val *data)
 	return MDB_SUCCESS;
 }
 
-int
-mdb_get(MDB_txn *txn, MDB_dbi dbi,
-    MDB_val *key, MDB_val *data)
+int mdb_get(MDB_txn *txn, MDB_dbi dbi,MDB_val *key, MDB_val *data)
 {
 	MDB_cursor	mc;
 	MDB_xcursor	mx;
@@ -8383,8 +8380,7 @@ mdb_branch_size(MDB_env *env, MDB_val *key)
  *	page's free space before calling this function.
  * </ul>
  */
-static int
-mdb_node_add(MDB_cursor *mc, indx_t indx,
+static int mdb_node_add(MDB_cursor *mc, indx_t indx,
     MDB_val *key, MDB_val *data, pgno_t pgno, unsigned int flags)
 {
 	unsigned int	 i;
@@ -8966,8 +8962,7 @@ mdb_cursor_copy(const MDB_cursor *csrc, MDB_cursor *cdst);
 
 /** Move a node from csrc to cdst.
  */
-static int
-mdb_node_move(MDB_cursor *csrc, MDB_cursor *cdst, int fromleft)
+static int mdb_node_move(MDB_cursor *csrc, MDB_cursor *cdst, int fromleft)
 {
 	MDB_node		*srcnode;
 	MDB_val		 key, data;

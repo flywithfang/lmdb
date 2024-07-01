@@ -22,3 +22,5 @@ core.*
 valgrind.*
 man/
 html/
+*.out
+btest
