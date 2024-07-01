@@ -973,8 +973,8 @@ enum {
 /** Common header for all page types. The page type depends on #mp_flags.
  *
  * #P_BRANCH and #P_LEAF pages have unsorted '#MDB_node's at the end, with
- * sorted #mp_ptrs[] entries referring to them. Exception: #P_LEAF2 pages
- * omit mp_ptrs and pack sorted #MDB_DUPFIXED values after the page header.
+ * sorted #offsets[] entries referring to them. Exception: #P_LEAF2 pages
+ * omit offsets and pack sorted #MDB_DUPFIXED values after the page header.
  *
  * #P_OVERFLOW records occupy one or more contiguous pages where only the
  * first has a page header. They hold the real data of #F_BIGDATA nodes.
@@ -988,14 +988,6 @@ enum {
  * Each non-metapage up to #MDB_meta.%mm_last_pg is reachable exactly once
  * in the snapshot: Either used by a database or listed in a freeDB record.
  */
-typedef struct MDB_page {
-#define	mp_pgno	mp_p.p_pgno
-#define	mp_next	mp_p.p_next
-	union {
-		pgno_t		p_pgno;	/**< page number */
-		struct MDB_page *p_next; /**< for in-memory list of freed pages */
-	} mp_p;
-	uint16_t	mp_pad;			/**< key size if this is a LEAF2 page */
 /**	@defgroup mdb_page	Page Flags
  *	@ingroup internal
  *	Flags for the page headers.
@@ -1011,6 +1003,16 @@ typedef struct MDB_page {
 #define	P_LOOSE		 0x4000		/**< page was dirtied then freed, can be reused */
 #define	P_KEEP		 0x8000		/**< leave this page alone during spill */
 /** @} */
+#define	mp_pgno	mp_p.p_pgno
+#define	mp_next	mp_p.p_next
+typedef struct MDB_page {
+
+	union {
+		pgno_t					 p_pgno;	/**< page number */
+		struct MDB_page *p_next; /**< for in-memory list of freed pages */
+	} mp_p;
+	uint16_t	mp_pad;			/**< key size if this is a LEAF2 page */
+
 	uint16_t	mp_flags;		/**< @ref mdb_page */
 #define mp_lower	mp_pb.pb.pb_lower
 #define mp_upper	mp_pb.pb.pb_upper
@@ -1022,7 +1024,7 @@ typedef struct MDB_page {
 		} pb;
 		uint32_t	pb_pages;	/**< number of overflow pages */
 	} mp_pb;
-	indx_t		mp_ptrs[0];		/**< dynamic size */
+	indx_t		offsets[0];		/**< dynamic size */
 } MDB_page;
 
 /** Alternate page header, for 2-byte aligned access */
@@ -1032,7 +1034,7 @@ typedef struct MDB_page2 {
 	uint16_t	mp2_flags;
 	indx_t		mp2_lower;
 	indx_t		mp2_upper;
-	indx_t		mp2_ptrs[0];
+	indx_t		mp2_offsets[0];
 } MDB_page2;
 
 #define MP_PGNO(p)	(((MDB_page2 *)(void *)(p))->mp2_p)
@@ -1040,10 +1042,10 @@ typedef struct MDB_page2 {
 #define MP_FLAGS(p)	(((MDB_page2 *)(void *)(p))->mp2_flags)
 #define MP_LOWER(p)	(((MDB_page2 *)(void *)(p))->mp2_lower)
 #define MP_UPPER(p)	(((MDB_page2 *)(void *)(p))->mp2_upper)
-#define MP_PTRS(p)	(((MDB_page2 *)(void *)(p))->mp2_ptrs)
+#define MP_OFFSETS(p)	(((MDB_page2 *)(void *)(p))->mp2_offsets)
 
 	/** Size of the page header, excluding dynamic data at the end */
-#define PAGEHDRSZ	 ((unsigned) offsetof(MDB_page, mp_ptrs))
+#define PAGEHDRSZ	 ((unsigned) offsetof(MDB_page, offsets))
 
 	/** Address of first usable data byte in a page, after the header */
 #define METADATA(p)	 ((void *)((char *)(p) + PAGEHDRSZ))
@@ -1098,15 +1100,7 @@ typedef struct MDB_page2 {
 	 * #F_DUPDATA and #F_SUBDATA can be combined giving duplicate data in
 	 * a sub-page/sub-database, and named databases (just #F_SUBDATA).
 	 */
-typedef struct MDB_node {
-	/** part of data size or pgno
-	 *	@{ */
-#if BYTE_ORDER == LITTLE_ENDIAN
-	unsigned short	mn_lo, mn_hi;
-#else
-	unsigned short	mn_hi, mn_lo;
-#endif
-	/** @} */
+/** @} */
 /** @defgroup mdb_node Node Flags
  *	@ingroup internal
  *	Flags for node headers.
@@ -1120,6 +1114,15 @@ typedef struct MDB_node {
 #define	NODE_ADD_FLAGS	(F_DUPDATA|F_SUBDATA|MDB_RESERVE|MDB_APPEND)
 
 /** @} */
+typedef struct MDB_node {
+	/** part of data size or pgno
+	 *	@{ */
+#if BYTE_ORDER == LITTLE_ENDIAN
+	unsigned short	mn_lo, mn_hi;
+#else
+	unsigned short	mn_hi, mn_lo;
+#endif
+	
 	unsigned short	mn_flags;		/**< @ref mdb_node */
 	unsigned short	mn_ksize;		/**< key size */
 	char		mn_data[1];			/**< key and data are appended here */
@@ -1142,7 +1145,7 @@ typedef struct MDB_node {
 #define LEAFSIZE(k, d)	 (NODESIZE + (k)->mv_size + (d)->mv_size)
 
 	/** Address of node \b i in page \b p */
-#define NODEPTR(p, i)	 ((MDB_node *)((char *)(p) + MP_PTRS(p)[i] + PAGEBASE))
+#define NODEPTR(p, i)	 ((MDB_node *)((char *)(p) + MP_OFFSETS(p)[i] + PAGEBASE))
 
 	/** Address of the key for the node */
 #define NODEKEY(node)	 (void *)((node)->mn_data)
@@ -1920,7 +1923,7 @@ mdb_page_list(MDB_page *mp)
 	fprintf(stderr, "%s %"Yu" numkeys %d%s\n", type, pgno, nkeys, state);
 
 	for (i=0; i<nkeys; i++) {
-		if (IS_LEAF2(mp)) {	/* LEAF2 pages have no mp_ptrs[] or node headers */
+		if (IS_LEAF2(mp)) {	/* LEAF2 pages have no offsets[] or node headers */
 			key.mv_size = nsize = mp->mp_pad;
 			key.mv_data = LEAF2KEY(mp, i, nsize);
 			total += nsize;
@@ -7922,9 +7925,9 @@ prep_subDB:
 				} else {
 					memcpy((char *)mp + MP_UPPER(mp) + PAGEBASE, (char *)fp + MP_UPPER(fp) + PAGEBASE,
 						olddata.mv_size - MP_UPPER(fp) - PAGEBASE);
-					memcpy((char *)MP_PTRS(mp), (char *)MP_PTRS(fp), NUMKEYS(fp) * sizeof(mp->mp_ptrs[0]));
+					memcpy((char *)MP_OFFSETS(mp), (char *)MP_OFFSETS(fp), NUMKEYS(fp) * sizeof(mp->offsets[0]));
 					for (i=0; i<NUMKEYS(fp); i++)
-						mp->mp_ptrs[i] += offset;
+						mp->offsets[i] += offset;
 				}
 			}
 
@@ -8450,12 +8453,12 @@ static int mdb_node_add(MDB_cursor *mc, indx_t indx,
 update:
 	/* Move higher pointers up one slot. */
 	for (i = NUMKEYS(mp); i > indx; i--)
-		MP_PTRS(mp)[i] = MP_PTRS(mp)[i - 1];
+		MP_OFFSETS(mp)[i] = MP_OFFSETS(mp)[i - 1];
 
 	/* Adjust free space offsets. */
 	ofs = MP_UPPER(mp) - node_size;
 	mdb_cassert(mc, ofs >= MP_LOWER(mp) + sizeof(indx_t));
-	MP_PTRS(mp)[indx] = ofs;
+	MP_OFFSETS(mp)[indx] = ofs;
 	MP_UPPER(mp) = ofs;
 	MP_LOWER(mp) += sizeof(indx_t);
 
@@ -8541,12 +8544,12 @@ mdb_node_del(MDB_cursor *mc, int ksize)
 	}
 	sz = EVEN(sz);
 
-	ptr = MP_PTRS(mp)[indx];
+	ptr = MP_OFFSETS(mp)[indx];
 	for (i = j = 0; i < numkeys; i++) {
 		if (i != indx) {
-			MP_PTRS(mp)[j] = MP_PTRS(mp)[i];
-			if (MP_PTRS(mp)[i] < ptr)
-				MP_PTRS(mp)[j] += sz;
+			MP_OFFSETS(mp)[j] = MP_OFFSETS(mp)[i];
+			if (MP_OFFSETS(mp)[i] < ptr)
+				MP_OFFSETS(mp)[j] += sz;
 			j++;
 		}
 	}
@@ -8584,7 +8587,7 @@ mdb_node_shrink(MDB_page *mp, indx_t indx)
 	} else {
 		xp = (MDB_page *)((char *)sp + delta); /* destination subpage */
 		for (i = NUMKEYS(sp); --i >= 0; )
-			MP_PTRS(xp)[i] = MP_PTRS(sp)[i] - delta;
+			MP_OFFSETS(xp)[i] = MP_OFFSETS(sp)[i] - delta;
 		len = PAGEHDRSZ;
 	}
 	MP_UPPER(sp) = MP_LOWER(sp);
@@ -8595,10 +8598,10 @@ mdb_node_shrink(MDB_page *mp, indx_t indx)
 	base = (char *)mp + mp->mp_upper + PAGEBASE;
 	memmove(base + delta, base, (char *)sp + len - base);
 
-	ptr = mp->mp_ptrs[indx];
+	ptr = mp->offsets[indx];
 	for (i = NUMKEYS(mp); --i >= 0; ) {
-		if (mp->mp_ptrs[i] <= ptr)
-			mp->mp_ptrs[i] += delta;
+		if (mp->offsets[i] <= ptr)
+			mp->offsets[i] += delta;
 	}
 	mp->mp_upper += delta;
 }
@@ -8886,7 +8889,7 @@ mdb_update_key(MDB_cursor *mc, MDB_val *key)
 	indx = mc->mc_ki[mc->mc_top];
 	mp = mc->mc_pg[mc->mc_top];
 	node = NODEPTR(mp, indx);
-	ptr = mp->mp_ptrs[indx];
+	ptr = mp->offsets[indx];
 #if MDB_DEBUG
 	{
 		MDB_val	k2;
@@ -8919,8 +8922,8 @@ mdb_update_key(MDB_cursor *mc, MDB_val *key)
 
 		numkeys = NUMKEYS(mp);
 		for (i = 0; i < numkeys; i++) {
-			if (mp->mp_ptrs[i] <= ptr)
-				mp->mp_ptrs[i] -= delta;
+			if (mp->offsets[i] <= ptr)
+				mp->offsets[i] -= delta;
 		}
 
 		base = (char *)mp + mp->mp_upper + PAGEBASE;
@@ -9826,15 +9829,15 @@ mdb_page_split(MDB_cursor *mc, MDB_val *newkey, MDB_val *newdata, pgno_t newpgno
 			}
 			if (x<0) {
 				ins = LEAF2KEY(mp, mc->mc_ki[mc->mc_top], ksize);
-				memcpy(rp->mp_ptrs, split, rsize);
-				sepkey.mv_data = rp->mp_ptrs;
+				memcpy(rp->offsets, split, rsize);
+				sepkey.mv_data = rp->offsets;
 				memmove(ins+ksize, ins, (split_indx - mc->mc_ki[mc->mc_top]) * ksize);
 				memcpy(ins, newkey->mv_data, ksize);
 				mp->mp_lower += sizeof(indx_t);
 				mp->mp_upper -= ksize - sizeof(indx_t);
 			} else {
 				if (x)
-					memcpy(rp->mp_ptrs, split, x * ksize);
+					memcpy(rp->offsets, split, x * ksize);
 				ins = LEAF2KEY(rp, x, ksize);
 				memcpy(ins, newkey->mv_data, ksize);
 				memcpy(ins+ksize, split + x * ksize, rsize - x * ksize);
@@ -9870,9 +9873,9 @@ mdb_page_split(MDB_cursor *mc, MDB_val *newkey, MDB_val *newdata, pgno_t newpgno
 			/* prepare to insert */
 			for (i=0, j=0; i<nkeys; i++) {
 				if (i == newindx) {
-					copy->mp_ptrs[j++] = 0;
+					copy->offsets[j++] = 0;
 				}
-				copy->mp_ptrs[j++] = mp->mp_ptrs[i];
+				copy->offsets[j++] = mp->offsets[i];
 			}
 
 			/* When items are relatively large the split point needs
@@ -9905,7 +9908,7 @@ mdb_page_split(MDB_cursor *mc, MDB_val *newkey, MDB_val *newdata, pgno_t newpgno
 						psize += nsize;
 						node = NULL;
 					} else {
-						node = (MDB_node *)((char *)mp + copy->mp_ptrs[i] + PAGEBASE);
+						node = (MDB_node *)((char *)mp + copy->offsets[i] + PAGEBASE);
 						psize += NODESIZE + NODEKSZ(node) + sizeof(indx_t);
 						if (IS_LEAF(mp)) {
 							if (F_ISSET(node->mn_flags, F_BIGDATA))
@@ -9925,7 +9928,7 @@ mdb_page_split(MDB_cursor *mc, MDB_val *newkey, MDB_val *newdata, pgno_t newpgno
 				sepkey.mv_size = newkey->mv_size;
 				sepkey.mv_data = newkey->mv_data;
 			} else {
-				node = (MDB_node *)((char *)mp + copy->mp_ptrs[split_indx] + PAGEBASE);
+				node = (MDB_node *)((char *)mp + copy->offsets[split_indx] + PAGEBASE);
 				sepkey.mv_size = node->mn_ksize;
 				sepkey.mv_data = NODEKEY(node);
 			}
@@ -10004,7 +10007,7 @@ mdb_page_split(MDB_cursor *mc, MDB_val *newkey, MDB_val *newdata, pgno_t newpgno
 				/* Update index for the new key. */
 				mc->mc_ki[mc->mc_top] = j;
 			} else {
-				node = (MDB_node *)((char *)mp + copy->mp_ptrs[i] + PAGEBASE);
+				node = (MDB_node *)((char *)mp + copy->offsets[i] + PAGEBASE);
 				rkey.mv_data = NODEKEY(node);
 				rkey.mv_size = node->mn_ksize;
 				if (IS_LEAF(mp)) {
@@ -10036,7 +10039,7 @@ mdb_page_split(MDB_cursor *mc, MDB_val *newkey, MDB_val *newdata, pgno_t newpgno
 
 		nkeys = NUMKEYS(copy);
 		for (i=0; i<nkeys; i++)
-			mp->mp_ptrs[i] = copy->mp_ptrs[i];
+			mp->offsets[i] = copy->offsets[i];
 		mp->mp_lower = copy->mp_lower;
 		mp->mp_upper = copy->mp_upper;
 		memcpy(NODEPTR(mp, nkeys-1), NODEPTR(copy, nkeys-1),
