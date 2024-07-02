@@ -35,7 +35,7 @@ void handle_error(int rc, const char* msg) {
 int main(int argc, char** argv) {
     int c;
     unsigned int flags = 0;
-    const char* filename = "test.db";
+    const char* filename = "testdb";
     MDB_env* env;
     MDB_dbi dbi;
     MDB_val key, data;
@@ -61,14 +61,14 @@ int main(int argc, char** argv) {
         std::cerr << "Missing command" << std::endl;
         return 1;
     }
-
+    assert(sizeof(mdb_size_t)==8);
     int rc = mdb_env_create(&env);
     handle_error(rc, "Failed to create environment");
     
-    rc = mdb_env_set_maxreaders(env, 1);
-    handle_error(rc, "Failed to set max readers");
+    //rc = mdb_env_set_maxreaders(env, 1);
+    //handle_error(rc, "Failed to set max readers");
 
-    rc = mdb_env_set_mapsize(env, 10485760);
+    rc = mdb_env_set_mapsize(env, 10485760lu*1000);
     handle_error(rc, "Failed to set map size");
 
     rc = mdb_env_open(env, filename, flags, 0664);
@@ -79,6 +79,8 @@ int main(int argc, char** argv) {
 
     rc = mdb_dbi_open(txn, nullptr, 0, &dbi);
     handle_error(rc, "Failed to open database");
+
+    printf("dbi=%u\n",dbi);
 
     rc = mdb_txn_commit(txn);
     handle_error(rc, "Failed to commit transaction");
@@ -139,7 +141,11 @@ int main(int argc, char** argv) {
                 data.mv_size = strlen(buf_val);
 
                 rc = mdb_put(txn, dbi, &key, &data, 0);
-                assert(rc == MDB_SUCCESS);
+                //assert(rc == MDB_SUCCESS);
+                if(rc!=MDB_SUCCESS){
+                     handle_error(rc,"mdb_put");
+                    break;
+                }
             }
             rc = mdb_txn_commit(txn);
             handle_error(rc, "Failed to commit transaction");

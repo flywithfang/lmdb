@@ -66,44 +66,9 @@ unsigned mdb_midl_search( MDB_IDL ids, MDB_ID id )
 	return cursor;
 }
 
-#if 0	/* superseded by append/sort */
-int mdb_midl_insert( MDB_IDL ids, MDB_ID id )
+MDB_ID * mdb_midl_alloc(int num)
 {
-	unsigned x, i;
-
-	x = mdb_midl_search( ids, id );
-	assert( x > 0 );
-
-	if( x < 1 ) {
-		/* internal error */
-		return -2;
-	}
-
-	if ( x <= ids[0] && ids[x] == id ) {
-		/* duplicate */
-		assert(0);
-		return -1;
-	}
-
-	if ( ++ids[0] >= MDB_IDL_DB_MAX ) {
-		/* no room */
-		--ids[0];
-		return -2;
-
-	} else {
-		/* insert id */
-		for (i=ids[0]; i>x; i--)
-			ids[i] = ids[i-1];
-		ids[x] = id;
-	}
-
-	return 0;
-}
-#endif
-
-MDB_IDL mdb_midl_alloc(int num)
-{
-	MDB_IDL ids = malloc((num+2) * sizeof(MDB_ID));
+	MDB_ID * ids = malloc((num+2) * sizeof(MDB_ID));
 	if (ids) {
 		*ids++ = num;
 		*ids = 0;
@@ -128,9 +93,9 @@ void mdb_midl_shrink( MDB_IDL *idp )
 	}
 }
 
-static int mdb_midl_grow( MDB_IDL *idp, int num )
+static int mdb_midl_grow( MDB_ID * *idp, int num )
 {
-	MDB_IDL idn = *idp-1;
+	MDB_ID * idn = *idp-1;
 	/* grow it */
 	idn = realloc(idn, (*idn + num + 2) * sizeof(MDB_ID));
 	if (!idn)
@@ -154,9 +119,9 @@ int mdb_midl_need( MDB_IDL *idp, unsigned num )
 	return 0;
 }
 
-int mdb_midl_append( MDB_IDL *idp, MDB_ID id )
+int mdb_midl_append( MDB_ID * *idp, MDB_ID id )
 {
-	MDB_IDL ids = *idp;
+	MDB_ID * ids = *idp;
 	/* Too big? */
 	if (ids[0] >= ids[-1]) {
 		if (mdb_midl_grow(idp, MDB_IDL_UM_MAX))
@@ -168,7 +133,7 @@ int mdb_midl_append( MDB_IDL *idp, MDB_ID id )
 	return 0;
 }
 
-int mdb_midl_append_list( MDB_IDL *idp, MDB_IDL app )
+int mdb_midl_append_list( MDB_ID * *idp, MDB_ID * app )
 {
 	MDB_IDL ids = *idp;
 	/* Too big? */
