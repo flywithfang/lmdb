@@ -831,13 +831,13 @@ typedef struct MDB_rxbody {
 } MDB_rxbody;
 
 	/** The actual reader record, with cacheline padding. */
-typedef struct MDB_reader {
-	union {
-		MDB_rxbody mrx;
 		/** shorthand for mrb_txnid */
 #define	mr_txnid	mru.mrx.mrb_txnid
 #define	mr_pid	mru.mrx.mrb_pid
 #define	mr_tid	mru.mrx.mrb_tid
+typedef struct MDB_reader {
+	union {
+		MDB_rxbody mrx;
 		/** cache line alignment */
 		char pad[(sizeof(MDB_rxbody)+CACHELINE-1) & ~(CACHELINE-1)];
 	} mru;
@@ -888,30 +888,22 @@ typedef struct MDB_txbody {
 } MDB_txbody;
 
 	/** The actual reader table definition. */
-typedef struct MDB_txninfo {
-	union {
-		MDB_txbody mtb;
 #define mti_magic	mt1.mtb.mtb_magic
 #define mti_format	mt1.mtb.mtb_format
 #define mti_rmutex	mt1.mtb.mtb_rmutex
 #define mti_txnid	mt1.mtb.mtb_txnid
 #define mti_numreaders	mt1.mtb.mtb_numreaders
 #define mti_mutexid	mt1.mtb.mtb_mutexid
-#ifdef MDB_USE_SYSV_SEM
-#define	mti_semid	mt1.mtb.mtb_semid
-#define	mti_rlocked	mt1.mtb.mtb_rlocked
-#endif
+#define mti_wmutex	mt2.mt2_wmutex
+typedef struct MDB_txninfo {
+	union {
+		MDB_txbody mtb;
 		char pad[(sizeof(MDB_txbody)+CACHELINE-1) & ~(CACHELINE-1)];
 	} mt1;
 #if !(defined(_WIN32) || defined(MDB_USE_POSIX_SEM))
 	union {
-#ifdef MDB_USE_SYSV_SEM
-		int mt2_wlocked;
-#define mti_wlocked	mt2.mt2_wlocked
-#else
+
 		mdb_mutex_t	mt2_wmutex;
-#define mti_wmutex	mt2.mt2_wmutex
-#endif
 		char pad[(MNAME_LEN+CACHELINE-1) & ~(CACHELINE-1)];
 	} mt2;
 #endif
@@ -1241,27 +1233,22 @@ typedef struct MDB_db {
 	 *	A meta page is the start point for accessing a database snapshot.
 	 *	Pages 0-1 are meta pages. Transaction N writes meta page #(N % 2).
 	 */
+	/** The size of pages used in this DB */
+#define	mm_psize	mm_dbs[FREE_DBI].md_pad
+	/** Any persistent environment flags. @ref mdb_env */
+#define	mm_flags	mm_dbs[FREE_DBI].md_flags
 typedef struct MDB_meta {
 		/** Stamp identifying this as an LMDB file. It must be set
 		 *	to #MDB_MAGIC. */
 	uint32_t	mm_magic;
 		/** Version number of this file. Must be set to #MDB_DATA_VERSION. */
 	uint32_t	mm_version;
-#ifdef MDB_VL32
-	union {		/* always zero since we don't support fixed mapping in MDB_VL32 */
-		MDB_ID	mmun_ull;
-		void *mmun_address;
-	} mm_un;
-#define	mm_address mm_un.mmun_address
-#else
+
 	void		*mm_address;		/**< address for fixed mapping */
-#endif
+
 	mdb_size_t	mm_mapsize;			/**< size of mmap region */
-	MDB_db		mm_dbs[CORE_DBS];	/**< first is free space, 2nd is main db */
-	/** The size of pages used in this DB */
-#define	mm_psize	mm_dbs[FREE_DBI].md_pad
-	/** Any persistent environment flags. @ref mdb_env */
-#define	mm_flags	mm_dbs[FREE_DBI].md_flags
+	MDB_db		  mm_dbs[CORE_DBS];	/**< first is free space, 2nd is main db */
+
 	/** Last used page in the datafile.
 	 *	Actually the file may be shorter if the freeDB lists the final pages.
 	 */
@@ -1302,9 +1289,7 @@ struct MDB_txn {
 	/** Nested txn under this txn, set together with flag #MDB_TXN_HAS_CHILD */
 	MDB_txn		*mt_child;
 	pgno_t		mt_next_pgno;	/**< next unallocated page */
-#ifdef MDB_VL32
-	pgno_t		mt_last_pgno;	/**< last written page */
-#endif
+
 	/** The ID of this transaction. IDs are integers incrementing from 1.
 	 *	Only committed write transactions increment the ID. If a transaction
 	 *	aborts, the ID may be re-used by the next writer.
@@ -1503,17 +1488,6 @@ typedef struct MDB_pgstate {
 	txnid_t		mf_pglast;	/**< ID of last used record, or 0 if !mf_pghead */
 } MDB_pgstate;
 
-	/** The database environment. */
-struct MDB_env {
-	HANDLE		me_fd;		/**< The main data file */
-	HANDLE		me_lfd;		/**< The lock file */
-	HANDLE		me_mfd;		/**< For writing and syncing the meta pages */
-#ifdef _WIN32
-#ifdef MDB_VL32
-	HANDLE		me_fmh;		/**< File Mapping handle */
-#endif /* MDB_VL32 */
-	HANDLE		me_ovfd;	/**< Overlapped/async with write-through file handle */
-#endif /* _WIN32 */
 	/** Failed to update the meta page. Probably an I/O error. */
 #define	MDB_FATAL_ERROR	0x80000000U
 	/** Some fields are initialized. */
@@ -1522,6 +1496,16 @@ struct MDB_env {
 #define	MDB_ENV_TXKEY	0x10000000U
 	/** fdatasync is unreliable */
 #define	MDB_FSYNCONLY	0x08000000U
+
+	/** The database environment. */
+struct MDB_env {
+	HANDLE		me_fd;		/**< The main data file */
+	HANDLE		me_lfd;		/**< The lock file */
+	HANDLE		me_mfd;		/**< For writing and syncing the meta pages */
+#ifdef _WIN32
+	HANDLE		me_ovfd;	/**< Overlapped/async with write-through file handle */
+#endif /* _WIN32 */
+
 	uint32_t 	me_flags;		/**< @ref mdb_env */
 	unsigned int	me_psize;	/**< DB page size, inited from me_os_psize */
 	unsigned int	me_os_psize;	/**< OS page size, from #GET_PAGESIZE */
@@ -1578,13 +1562,7 @@ struct MDB_env {
 	char		me_mutexname[sizeof(MUTEXNAME_PREFIX) + 11];
 # endif
 #endif
-#ifdef MDB_VL32
-	MDB_ID3L	me_rpages;	/**< like #mt_rpages, but global to env */
-	pthread_mutex_t	me_rpmutex;	/**< control access to #me_rpages */
-#define MDB_ERPAGE_SIZE	16384
-#define MDB_ERPAGE_MAX	(MDB_ERPAGE_SIZE-1)
-	unsigned int me_rpcheck;
-#endif
+
 	void		*me_userctx;	 /**< User-settable context */
 	MDB_assert_func *me_assert_func; /**< Callback for assertion failures */
 };
@@ -4344,15 +4322,14 @@ mdb_env_init_meta(MDB_env *env, MDB_meta *meta)
  * @param[in] txn the transaction that's being committed
  * @return 0 on success, non-zero on failure.
  */
-static int
-mdb_env_write_meta(MDB_txn *txn)
+static int mdb_env_write_meta(MDB_txn *txn)
 {
 	MDB_env *env;
-	MDB_meta	meta, metab, *mp;
+	MDB_meta	meta, metab;
 	unsigned flags;
 	mdb_size_t mapsize;
 	MDB_OFF_T off;
-	int rc, len, toggle;
+	int rc, len;
 	char *ptr;
 	HANDLE mfd;
 #ifdef _WIN32
@@ -4361,13 +4338,13 @@ mdb_env_write_meta(MDB_txn *txn)
 	int r2;
 #endif
 
-	toggle = txn->mt_txnid & 1;
+	const int toggle = txn->mt_txnid & 1;
 	DPRINTF(("writing meta page %d for root page %"Yu,
 		toggle, txn->mt_dbs[MAIN_DBI].md_root));
 
 	env = txn->mt_env;
 	flags = txn->mt_flags | env->me_flags;
-	mp = env->me_metas[toggle];
+	MDB_meta* const mp = env->me_metas[toggle];
 	mapsize = env->me_metas[toggle ^ 1]->mm_mapsize;
 	/* Persist any increases of mapsize config */
 	if (mapsize < env->me_mapsize)
@@ -10145,9 +10122,7 @@ done:
 	return rc;
 }
 
-int
-mdb_put(MDB_txn *txn, MDB_dbi dbi,
-    MDB_val *key, MDB_val *data, unsigned int flags)
+int mdb_put(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data, unsigned int flags)
 {
 	MDB_cursor mc;
 	MDB_xcursor mx;
