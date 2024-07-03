@@ -165,22 +165,9 @@ typedef SSIZE_T	ssize_t;
 #ifndef _WIN32
 #include <pthread.h>
 #include <signal.h>
-#ifdef MDB_USE_POSIX_SEM
-# define MDB_USE_HASH		1
-#include <semaphore.h>
-#elif defined(MDB_USE_SYSV_SEM)
-#include <sys/ipc.h>
-#include <sys/sem.h>
-#ifdef _SEM_SEMUN_UNDEFINED
-union semun {
-	int val;
-	struct semid_ds *buf;
-	unsigned short *array;
-};
-#endif /* _SEM_SEMUN_UNDEFINED */
-#else
+
 #define MDB_USE_POSIX_MUTEX	1
-#endif /* MDB_USE_POSIX_SEM */
+
 #endif /* !_WIN32 */
 
 #if defined(_WIN32) + defined(MDB_USE_POSIX_SEM) + defined(MDB_USE_SYSV_SEM) \
@@ -525,7 +512,7 @@ typedef MDB_ID	txnid_t;
 #define MDB_DBG_TRACE	2
 
 #if MDB_DEBUG
-static int mdb_debug = MDB_DBG_TRACE;
+static int mdb_debug = MDB_DBG_INFO;
 static txnid_t mdb_debug_start;
 
 	/**	Print a debug message with printf formatting.
@@ -1180,6 +1167,7 @@ typedef struct MDB_db {
 #define	mm_psize	mm_dbs[FREE_DBI].md_pad
 	/** Any persistent environment flags. @ref mdb_env */
 #define	mm_flags	mm_dbs[FREE_DBI].md_flags
+
 typedef struct MDB_meta {
 		/** Stamp identifying this as an LMDB file. It must be set
 		 *	to #MDB_MAGIC. */
@@ -3122,7 +3110,7 @@ mdb_txn_renew(MDB_txn *txn)
 
 	rc = mdb_txn_renew0(txn);
 	if (rc == MDB_SUCCESS) {
-		DPRINTF(("renew txn %"Yu"%c %p on mdbenv %p, root page %"Yu,
+		DPRINTF(("renew txn %zu %c %p on mdbenv %p, root page %zu",
 			txn->mt_txnid, (txn->mt_flags & MDB_TXN_RDONLY) ? 'r' : 'w',
 			(void *)txn, (void *)txn->mt_env, txn->mt_dbs[MAIN_DBI].md_root));
 	}
@@ -3164,17 +3152,7 @@ int mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **r
 		DPRINTF(("calloc: %s", strerror(errno)));
 		return ENOMEM;
 	}
-#ifdef MDB_VL32
-	if (!parent) {
-		txn->mt_rpages = malloc(MDB_TRPAGE_SIZE * sizeof(MDB_ID3));
-		if (!txn->mt_rpages) {
-			free(txn);
-			return ENOMEM;
-		}
-		txn->mt_rpages[0].mid = 0;
-		txn->mt_rpcheck = MDB_TRPAGE_SIZE/2;
-	}
-#endif
+
 	txn->mt_dbxs = env->me_dbxs;	/* static */
 	txn->mt_dbs = (MDB_db *) ((char *)txn + tsize);
 	txn->mt_dbflags = (unsigned char *)txn + size - env->me_maxdbs;
@@ -3202,9 +3180,7 @@ int mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **r
 		parent->mt_child = txn;
 		txn->mt_parent = parent;
 		txn->mt_numdbs = parent->mt_numdbs;
-#ifdef MDB_VL32
-		txn->mt_rpages = parent->mt_rpages;
-#endif
+
 		memcpy(txn->mt_dbs, parent->mt_dbs, txn->mt_numdbs * sizeof(MDB_db));
 		/* Copy parent's mt_dbflags, but clear DB_NEW */
 		for (i=0; i<txn->mt_numdbs; i++)
@@ -3231,15 +3207,12 @@ renew:
 	}
 	if (rc) {
 		if (txn != env->me_txn0) {
-#ifdef MDB_VL32
-			free(txn->mt_rpages);
-#endif
 			free(txn);
 		}
 	} else {
 		txn->mt_flags |= flags;	/* could not change txn=me_txn0 earlier */
 		*ret = txn;
-		DPRINTF(("begin txn %"Yu"%c %p on mdbenv %p, root page %"Yu,
+		DPRINTF(("begin txn %zu %c %p on mdbenv %p, root page %zu",
 			txn->mt_txnid, (flags & MDB_RDONLY) ? 'r' : 'w',
 			(void *) txn, (void *) env, txn->mt_dbs[MAIN_DBI].md_root));
 	}
@@ -4274,7 +4247,7 @@ static int mdb_env_write_meta(MDB_txn *txn)
 	MDB_OFF_T off;
 	int rc, len;
 	char *ptr;
-	HANDLE mfd;
+	
 #ifdef _WIN32
 	OVERLAPPED ov;
 #else
@@ -4339,7 +4312,7 @@ static int mdb_env_write_meta(MDB_txn *txn)
 	 * (me_mfd goes to the same file as me_fd, but writing to it
 	 * also syncs to disk.  Avoids a separate fdatasync() call.)
 	 */
-	mfd = (flags & (MDB_NOSYNC|MDB_NOMETASYNC)) ? env->me_fd : env->me_mfd;
+	const HANDLE mfd = (flags & (MDB_NOSYNC|MDB_NOMETASYNC)) ? env->me_fd : env->me_mfd;
 #ifdef _WIN32
 	{
 		memset(&ov, 0, sizeof(ov));
@@ -4395,16 +4368,13 @@ done:
  * @param[in] env the environment handle
  * @return newest #MDB_meta.
  */
-static MDB_meta *
-mdb_env_pick_meta(const MDB_env *env)
+static MDB_meta * mdb_env_pick_meta(const MDB_env *env)
 {
 	MDB_meta *const *metas = env->me_metas;
-	return metas[ (metas[0]->mm_txnid < metas[1]->mm_txnid) ^
-		((env->me_flags & MDB_PREVSNAPSHOT) != 0) ];
+	return metas[ (metas[0]->mm_txnid < metas[1]->mm_txnid) ^ ((env->me_flags & MDB_PREVSNAPSHOT) != 0) ];
 }
 
-int ESECT
-mdb_env_create(MDB_env **env)
+int ESECT mdb_env_create(MDB_env **env)
 {
 	MDB_env *e;
 
@@ -4415,14 +4385,14 @@ mdb_env_create(MDB_env **env)
 	e->me_maxreaders = DEFAULT_READERS;
 	e->me_maxdbs = e->me_numdbs = CORE_DBS;
 	e->me_fd = INVALID_HANDLE_VALUE;
-	e->me_lfd = INVALID_HANDLE_VALUE;
-	e->me_mfd = INVALID_HANDLE_VALUE;
+	e->me_lfd = INVALID_HANDLE_VALUE;//lock file
+	e->me_mfd = INVALID_HANDLE_VALUE;//data file
 
 	e->me_pid = getpid();
 	GET_PAGESIZE(e->me_os_psize);
 	VGMEMP_CREATE(e,0,0);
 	*env = e;
-	MDB_TRACE(("%p", e));
+	MDB_TRACE(("env %p, pagesize:%u", e,e->me_os_psize));
 	return MDB_SUCCESS;
 }
 
@@ -4439,8 +4409,7 @@ mdb_nt2win32(NTSTATUS st)
 }
 #endif
 
-static int ESECT
-mdb_env_map(MDB_env *env, void *addr)
+static int ESECT mdb_env_map(MDB_env *env, void *addr)
 {
 	MDB_page *p;
 	unsigned int flags = env->me_flags;
@@ -4539,18 +4508,17 @@ mdb_env_map(MDB_env *env, void *addr)
 	return MDB_SUCCESS;
 }
 
-int ESECT
-mdb_env_set_mapsize(MDB_env *env, mdb_size_t size)
+int ESECT mdb_env_set_mapsize(MDB_env *env, mdb_size_t size)
 {
 	/* If env is already open, caller is responsible for making
 	 * sure there are no active txns.
 	 */
 	if (env->me_map) {
 		MDB_meta *meta;
-#ifndef MDB_VL32
+
 		void *old;
 		int rc;
-#endif
+
 		if (env->me_txn)
 			return EINVAL;
 		meta = mdb_env_pick_meta(env);
@@ -4562,7 +4530,7 @@ mdb_env_set_mapsize(MDB_env *env, mdb_size_t size)
 			if (size < minsize)
 				size = minsize;
 		}
-#ifndef MDB_VL32
+
 		/* For MDB_VL32 this bit is a noop since we dynamically remap
 		 * chunks of the DB anyway.
 		 */
@@ -4572,12 +4540,12 @@ mdb_env_set_mapsize(MDB_env *env, mdb_size_t size)
 		rc = mdb_env_map(env, old);
 		if (rc)
 			return rc;
-#endif /* !MDB_VL32 */
+
 	}
 	env->me_mapsize = size;
 	if (env->me_psize)
 		env->me_maxpg = env->me_mapsize / env->me_psize;
-	MDB_TRACE(("%p, %"Yu"", env, size));
+	MDB_TRACE(("env:%p, sz:%"Yu" max_pages:%lu", env, size,env->me_maxpg));
 	return MDB_SUCCESS;
 }
 
@@ -4724,10 +4692,7 @@ enum mdb_fopen_type {
  * @param[out] res	Resulting file handle.
  * @return 0 on success, non-zero on failure.
  */
-static int ESECT
-mdb_fopen(const MDB_env *env, MDB_name *fname,
-	enum mdb_fopen_type which, mdb_mode_t mode,
-	HANDLE *res)
+static int ESECT mdb_fopen(const MDB_env *env, MDB_name *fname,	enum mdb_fopen_type which, mdb_mode_t mode, HANDLE *res)
 {
 	int rc = MDB_SUCCESS;
 	HANDLE fd;
@@ -4818,16 +4783,9 @@ mdb_fopen(const MDB_env *env, MDB_name *fname,
 	return rc;
 }
 
-
-#ifdef BROKEN_FDATASYNC
-#include <sys/utsname.h>
-#include <sys/vfs.h>
-#endif
-
 /** Further setup required for opening an LMDB environment
  */
-static int ESECT
-mdb_env_open2(MDB_env *env, int prev)
+static int ESECT mdb_env_open2(MDB_env *env, int prev)
 {
 	unsigned int flags = env->me_flags;
 	int i, newenv = 0, rc;
@@ -4858,53 +4816,6 @@ mdb_env_open2(MDB_env *env, int prev)
 	env->ovs = 0;
 #endif /* _WIN32 */
 
-#ifdef BROKEN_FDATASYNC
-	/* ext3/ext4 fdatasync is broken on some older Linux kernels.
-	 * https://lkml.org/lkml/2012/9/3/83
-	 * Kernels after 3.6-rc6 are known good.
-	 * https://lkml.org/lkml/2012/9/10/556
-	 * See if the DB is on ext3/ext4, then check for new enough kernel
-	 * Kernels 2.6.32.60, 2.6.34.15, 3.2.30, and 3.5.4 are also known
-	 * to be patched.
-	 */
-	{
-		struct statfs st;
-		fstatfs(env->me_fd, &st);
-		while (st.f_type == 0xEF53) {
-			struct utsname uts;
-			int i;
-			uname(&uts);
-			if (uts.release[0] < '3') {
-				if (!strncmp(uts.release, "2.6.32.", 7)) {
-					i = atoi(uts.release+7);
-					if (i >= 60)
-						break;	/* 2.6.32.60 and newer is OK */
-				} else if (!strncmp(uts.release, "2.6.34.", 7)) {
-					i = atoi(uts.release+7);
-					if (i >= 15)
-						break;	/* 2.6.34.15 and newer is OK */
-				}
-			} else if (uts.release[0] == '3') {
-				i = atoi(uts.release+2);
-				if (i > 5)
-					break;	/* 3.6 and newer is OK */
-				if (i == 5) {
-					i = atoi(uts.release+4);
-					if (i >= 4)
-						break;	/* 3.5.4 and newer is OK */
-				} else if (i == 2) {
-					i = atoi(uts.release+4);
-					if (i >= 30)
-						break;	/* 3.2.30 and newer is OK */
-				}
-			} else {	/* 4.x and newer is OK */
-				break;
-			}
-			env->me_flags |= MDB_FSYNCONLY;
-			break;
-		}
-	}
-#endif
 
 	if ((i = mdb_env_read_header(env, prev, &meta)) != 0) {
 		if (i != ENOENT)
@@ -4985,7 +4896,7 @@ mdb_env_open2(MDB_env *env, int prev)
 #if MDB_DEBUG
 	{
 		MDB_meta *meta = mdb_env_pick_meta(env);
-		MDB_db *db = &meta->mm_dbs[MAIN_DBI];
+		MDB_db *const db = &meta->mm_dbs[MAIN_DBI];
 
 		DPRINTF(("opened database version %u, pagesize %u",
 			meta->mm_version, env->me_psize));
@@ -5488,9 +5399,7 @@ int ESECT mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_m
 		}
 	}
 
-	rc = mdb_fopen(env, &fname,
-		(flags & MDB_RDONLY) ? MDB_O_RDONLY : MDB_O_RDWR,
-		mode, &env->me_fd);
+	rc = mdb_fopen(env, &fname,(flags & MDB_RDONLY) ? MDB_O_RDONLY : MDB_O_RDWR, mode, &env->me_fd);
 	if (rc)
 		goto leave;
 #ifdef _WIN32
@@ -11240,3 +11149,6 @@ utf8_to_utf16(const char *src, MDB_name *dst, int xtra)
 }
 #endif /* defined(_WIN32) */
 /** @} */
+int mdb_dump_page(MDB_env *env, unsigned pgno){
+	return 0;
+}

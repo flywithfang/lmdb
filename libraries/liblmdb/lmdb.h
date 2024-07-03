@@ -187,25 +187,18 @@ typedef	mode_t	mdb_mode_t;
 # define MDB_FMT_Z	"z"			/**< printf/scanf format modifier for size_t */
 #endif
 
-#ifndef MDB_VL32
+
 /** Unsigned type used for mapsize, entry counts and page/transaction IDs.
  *
  *	It is normally size_t, hence the name. Defining MDB_VL32 makes it
  *	uint64_t, but do not try this unless you know what you are doing.
  */
-typedef size_t	mdb_size_t;
+typedef size_t			mdb_size_t;
 # define MDB_SIZE_MAX	SIZE_MAX	/**< max #mdb_size_t */
 /** #mdb_size_t printf formats, \b t = one of [diouxX] without quotes */
 # define MDB_PRIy(t)	MDB_FMT_Z #t
 /** #mdb_size_t scanf formats, \b t = one of [dioux] without quotes */
 # define MDB_SCNy(t)	MDB_FMT_Z #t
-#else
-typedef uint64_t	mdb_size_t;
-# define MDB_SIZE_MAX	UINT64_MAX
-# define MDB_PRIy(t)	PRI##t##64
-# define MDB_SCNy(t)	SCN##t##64
-# define mdb_env_create	mdb_env_create_vl32	/**< Prevent mixing with non-VL32 builds */
-#endif
 
 /** An abstraction for a file handle.
  *	On POSIX systems file handles are small integers. On Windows
@@ -1638,6 +1631,7 @@ int	mdb_reader_list(MDB_env *env, MDB_msg_func *func, void *ctx);
 int	mdb_reader_check(MDB_env *env, int *dead);
 /**	@} */
 
+int mdb_dump_page(MDB_env *env, unsigned pgno);
 #ifdef __cplusplus
 }
 #endif

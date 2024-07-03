@@ -332,7 +332,14 @@ int main(int argc, char** argv) {
         mdb_txn_abort(txn);
         if (checked) ++checked;
         std::cout << "checked " << checked << "/" << n << std::endl;
-    }
+    }else if (strcmp(argv[0], "print") == 0) {
+        if (argc < 2){
+            std::cerr<<"missing arguments";
+            exit(1);
+        }
+        const unsigned int page_no = atoi(argv[1]);
+        mdb_dump_page(env,page_no);
+    } 
     else {
         std::cerr << argv[0] << ": invalid command" << std::endl;
     }
