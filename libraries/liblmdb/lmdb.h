@@ -404,7 +404,7 @@ typedef enum MDB_cursor_op {
 	MDB_NEXT,				/**< Position at next data item */
 	MDB_NEXT_DUP,			/**< Position at next data item of current key.
 								Only for #MDB_DUPSORT */
-	MDB_NEXT_MULTIPLE,		/**< Return up to a page of duplicate data items
+	MDB_NEXT_MULTIPLE,/*10*/		/**< Return up to a page of duplicate data items
 								from next cursor position. Move cursor to prepare
 								for #MDB_NEXT_MULTIPLE. Only for #MDB_DUPFIXED */
 	MDB_NEXT_NODUP,			/**< Position at first data item of next key */
@@ -412,7 +412,7 @@ typedef enum MDB_cursor_op {
 	MDB_PREV_DUP,			/**< Position at previous data item of current key.
 								Only for #MDB_DUPSORT */
 	MDB_PREV_NODUP,			/**< Position at last data item of previous key */
-	MDB_SET,				/**< Position at specified key */
+	MDB_SET,/*15*/				/**< Position at specified key */
 	MDB_SET_KEY,			/**< Position at specified key, return key + data */
 	MDB_SET_RANGE,			/**< Position at first key greater than or equal to specified key. */
 	MDB_PREV_MULTIPLE		/**< Position at previous page and return up to
