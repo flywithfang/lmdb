@@ -1,3 +1,3 @@
-gcc -DMDB_DEBUG -Werror -c -g mdb.c midl.c;g++ -DMDB_DEBUG -g -Werror -c btest.cpp -I .;g++ mdb.o midl.o btest.o -o btest
+gcc -DMDB_DEBUG=2 -Werror -c -g mdb.c midl.c;g++ -DMDB_DEBUG -g -Werror -c btest.cpp -I .;g++ mdb.o midl.o btest.o -o btest
 
 #gcc -Werror -c  mdb.c midl.c;g++  -Werror -c btest.cpp -I .;g++ mdb.o midl.o btest.o -o btest

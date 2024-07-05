@@ -419,6 +419,7 @@ typedef enum MDB_cursor_op {
 								a page of duplicate data items. Only for #MDB_DUPFIXED */
 } MDB_cursor_op;
 
+
 /** @defgroup  errors	Return Codes
  *
  *	BerkeleyDB uses -30800 to -30999, we'll go under them
