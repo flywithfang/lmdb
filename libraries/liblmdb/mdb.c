@@ -1543,7 +1543,7 @@ enum {
 static void mdb_txn_end(MDB_txn *txn, unsigned mode);
 
 static int  mdb_page_get(MDB_cursor *mc, pgno_t pgno, MDB_page **mp, int *lvl);
-static int  mdb_page_search_root(MDB_cursor *mc,MDB_val *key, int modify);
+static int  _mdb_page_search(MDB_cursor *mc,MDB_val *key, int modify);
 #define MDB_PS_MODIFY	1
 #define MDB_PS_ROOTONLY	2
 #define MDB_PS_FIRST	4
@@ -5690,6 +5690,21 @@ mdb_cmp_memnr(const MDB_val *a, const MDB_val *b)
 	return len_diff<0 ? -1 : len_diff;
 }
 
+const char * page_type_tag(uint16_t flags){
+	if(flags& P_LEAF2){
+		return "leaf2";
+	}else if (flags& P_LEAF){
+		return "leaf";
+	}else if(flags&P_BRANCH){
+		return "branch";
+	}else if(flags&P_META){
+		return "meta";
+	}else if(flags&P_OVERFLOW){
+		return "overflow";
+	}else{
+		return "unknown";
+	}
+}
 /** Search for key within a page, using binary search.
  * Returns the smallest entry larger or equal to the key.
  * If exactp is non-null, stores whether the found entry was an exact match
@@ -5710,8 +5725,7 @@ static MDB_node * mdb_node_search(MDB_cursor *mc, MDB_val *key, int *exactp)
 
 	nkeys = NUMKEYS(mp);
 
-	DPRINTF(("searching %u keys in %s %spage %"Yu,
-	    nkeys, IS_LEAF(mp) ? "leaf" : "branch", IS_SUBP(mp) ? "sub-" : "",
+	DPRINTF(("searching %u keys in %s %spage %"Yu, nkeys, page_type_tag(mp->mp_flags), IS_SUBP(mp) ? "sub-" : "",
 	    mdb_dbg_pgno(mp)));
 
 	low = IS_LEAF(mp) ? 0 : 1;
@@ -5755,10 +5769,9 @@ static MDB_node * mdb_node_search(MDB_cursor *mc, MDB_val *key, int *exactp)
 			rc = cmp(key, &nodekey);
 #if MDB_DEBUG
 			if (IS_LEAF(mp))
-				DPRINTF(("found leaf index %u [%s], rc = %i",i, DKEY(&nodekey), rc));
+				DPRINTF(("leaf page checking %u [%s], rc = %i",i, DKEY(&nodekey), rc));
 			else
-				DPRINTF(("found branch index %u [%s -> %"Yu"], rc = %i",
-				    i, DKEY(&nodekey), NODEPGNO(node), rc));
+				DPRINTF(("branch page checking %u [%s -> %"Yu"], rc = %i", i, DKEY(&nodekey), NODEPGNO(node), rc));
 #endif
 			if (rc == 0)
 				break;
@@ -5804,7 +5817,6 @@ mdb_cursor_adjust(MDB_cursor *mc, func)
 static void mdb_cursor_pop(MDB_cursor *mc)
 {
 	if (mc->mc_snum) {
-		DPRINTF(("popping page %zu off db %d cursor %p", mc->mc_pg[mc->mc_top]->mp_pgno, DDBI(mc), (void *) mc));
 
 		mc->mc_snum--;
 		if (mc->mc_snum) {
@@ -5812,6 +5824,7 @@ static void mdb_cursor_pop(MDB_cursor *mc)
 		} else {
 			mc->mc_flags &= ~C_INITIALIZED;
 		}
+		DPRINTF(("cursor up %u:%zu off db %d cursor %p",mc->mc_top, mc->mc_pg[mc->mc_top]->mp_pgno, DDBI(mc), (void *) mc));
 	}
 }
 
@@ -5820,8 +5833,7 @@ static void mdb_cursor_pop(MDB_cursor *mc)
  */
 static int mdb_cursor_push(MDB_cursor *mc, MDB_page *mp)
 {
-	DPRINTF(("pushing page %"Yu" on db %d cursor %p", mp->mp_pgno,DDBI(mc), (void *) mc));
-
+	
 	if (mc->mc_snum >= CURSOR_STACK) {
 		mc->mc_txn->mt_flags |= MDB_TXN_ERROR;
 		return MDB_CURSOR_FULL;
@@ -5830,6 +5842,8 @@ static int mdb_cursor_push(MDB_cursor *mc, MDB_page *mp)
 	mc->mc_top = mc->mc_snum++;
 	mc->mc_pg[mc->mc_top] = mp;
 	mc->mc_ki[mc->mc_top] = 0;
+
+	DPRINTF(("cursor down %u:%"Yu" on db %d cursor %p",mc->mc_top, mp->mp_pgno,DDBI(mc), (void *) mc));
 
 	return MDB_SUCCESS;
 }
@@ -5903,7 +5917,7 @@ done:
 /** Finish #mdb_page_search() / #mdb_page_search_lowest().
  *	The cursor is at the root page, set up the rest of it.
  */
-static int mdb_page_search_root(MDB_cursor *mc, MDB_val *key, int flags)
+static int _mdb_page_search(MDB_cursor *mc, MDB_val *key, int flags)
 {
 	MDB_page	*mp = mc->mc_pg[mc->mc_top];
 	int rc;
@@ -5919,7 +5933,7 @@ static int mdb_page_search_root(MDB_cursor *mc, MDB_val *key, int flags)
 		 * let that proceed. ITS#8336
 		 */
 		mdb_cassert(mc, !mc->mc_dbi || NUMKEYS(mp) > 1);
-		DPRINTF(("found index 0 to page %"Yu, NODEPGNO(NODEPTR(mp, 0))));
+		//DPRINTF(("found index 0 to page %"Yu, NODEPGNO(NODEPTR(mp, 0))));
 
 		if (flags & (MDB_PS_FIRST|MDB_PS_LAST)) {
 			i = 0;
@@ -5983,12 +5997,11 @@ ready:
 
 /** Search for the lowest key under the current branch page.
  * This just bypasses a NUMKEYS check in the current page
- * before calling mdb_page_search_root(), because the callers
+ * before calling _mdb_page_search(), because the callers
  * are all in situations where the current page is known to
  * be underfilled.
  */
-static int
-mdb_page_search_lowest(MDB_cursor *mc)
+static int mdb_page_search_lowest(MDB_cursor *mc)
 {
 	MDB_page	*mp = mc->mc_pg[mc->mc_top];
 	MDB_node	*node = NODEPTR(mp, 0);
@@ -6000,7 +6013,7 @@ mdb_page_search_lowest(MDB_cursor *mc)
 	mc->mc_ki[mc->mc_top] = 0;
 	if ((rc = mdb_cursor_push(mc, mp)))
 		return rc;
-	return mdb_page_search_root(mc, NULL, MDB_PS_FIRST);
+	return _mdb_page_search(mc, NULL, MDB_PS_FIRST);
 }
 
 /** Search for the page a given key should be in.
@@ -6077,7 +6090,7 @@ static int mdb_page_search(MDB_cursor *mc, MDB_val *key, int flags)
 		mc->mc_snum = 1;
 		mc->mc_top = 0;
 
-		DPRINTF(("db %d root page %"Yu" has flags 0x%X", DDBI(mc), root, mc->mc_pg[0]->mp_flags));
+		DPRINTF(("db %d root page %"Yu" %s", DDBI(mc), root, page_type_tag(mc->mc_pg[0]->mp_flags) ));
 
 		if (flags & MDB_PS_MODIFY) {
 			if ((rc = mdb_page_touch(mc)))
@@ -6087,7 +6100,7 @@ static int mdb_page_search(MDB_cursor *mc, MDB_val *key, int flags)
 		if (flags & MDB_PS_ROOTONLY)
 			return MDB_SUCCESS;
 
-		return mdb_page_search_root(mc, key, flags);
+		return _mdb_page_search(mc, key, flags);
 
 	}
 
@@ -9685,7 +9698,7 @@ mdb_env_cwalk(mdb_copy *my, pgno_t *pg, int flags)
 	rc = mdb_page_get(&mc, *pg, &mc.mc_pg[0], NULL);
 	if (rc)
 		return rc;
-	rc = mdb_page_search_root(&mc, NULL, MDB_PS_FIRST);
+	rc = _mdb_page_search(&mc, NULL, MDB_PS_FIRST);
 	if (rc)
 		return rc;
 
@@ -10863,6 +10876,7 @@ int mdb_dump_page(MDB_env *env, unsigned pgno){
 		if(rc!=MDB_SUCCESS){
 			return rc;
 		}
+		printf("page %lu, type:%s",page->mp_pgno,page_type_tag(page->mp_flags));
 	const unsigned int psize=  env->me_metas[0]->mm_dbs[FREE_DBI].md_pad;
 	if(page->mp_flags & P_LEAF){
 		const unsigned int n = get_page_keys_count(page);

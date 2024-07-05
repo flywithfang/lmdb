@@ -80,8 +80,6 @@ int main(int argc, char** argv) {
     rc = mdb_dbi_open(txn, nullptr, 0, &dbi);
     handle_error(rc, "Failed to open database");
 
-    printf("dbi=%u\n",dbi);
-
     rc = mdb_txn_commit(txn);
     handle_error(rc, "Failed to commit transaction");
 
