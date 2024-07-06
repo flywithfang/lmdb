@@ -1480,8 +1480,7 @@ MDB_dbi mdb_cursor_dbi(MDB_cursor *cursor);
 	 *	<li>EINVAL - an invalid parameter was specified.
 	 * </ul>
 	 */
-int  mdb_cursor_get(MDB_cursor *cursor, MDB_val *key, MDB_val *data,
-			    MDB_cursor_op op);
+int  mdb_cursor_get(MDB_cursor *cursor, MDB_val *key, MDB_val *data,MDB_cursor_op op);
 
 	/** @brief Store by cursor.
 	 *
@@ -1542,8 +1541,7 @@ int  mdb_cursor_get(MDB_cursor *cursor, MDB_val *key, MDB_val *data,
 	 *	<li>EINVAL - an invalid parameter was specified.
 	 * </ul>
 	 */
-int  mdb_cursor_put(MDB_cursor *cursor, MDB_val *key, MDB_val *data,
-				unsigned int flags);
+int  mdb_cursor_put(MDB_cursor *cursor, MDB_val *key, MDB_val *data,unsigned int flags);
 
 	/** @brief Delete current key/data pair
 	 *

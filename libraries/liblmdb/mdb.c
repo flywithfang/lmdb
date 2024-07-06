@@ -1597,7 +1597,7 @@ static void	mdb_xcursor_init1(MDB_cursor *mc, MDB_node *node);
 static void	mdb_xcursor_init2(MDB_cursor *mc, MDB_xcursor *src_mx, int force);
 
 static int	mdb_drop0(MDB_cursor *mc, int subs);
-static void mdb_default_cmp(MDB_txn *txn, MDB_dbi dbi);
+static void mdb_init_default_cmp(MDB_txn *txn, MDB_dbi dbi);
 static int mdb_reader_check0(MDB_env *env, int rlocked, int *dead);
 
 /** @cond */
@@ -1743,8 +1743,7 @@ mdb_assert_fail(MDB_env *env, const char *expr_txt,
 
 #if MDB_DEBUG
 /** Return the page number of \b mp which may be sub-page, for debug output */
-static pgno_t
-mdb_dbg_pgno(MDB_page *mp)
+static pgno_t mdb_dbg_pgno(MDB_page *mp)
 {
 	pgno_t ret;
 	COPY_PGNO(ret, MP_PGNO(mp));
@@ -3387,8 +3386,7 @@ _mdb_txn_abort(MDB_txn *txn)
 	mdb_txn_end(txn, MDB_END_ABORT|MDB_END_SLOT|MDB_END_FREE);
 }
 
-void
-mdb_txn_abort(MDB_txn *txn)
+void mdb_txn_abort(MDB_txn *txn)
 {
 	MDB_TRACE(("%p", txn));
 	_mdb_txn_abort(txn);
@@ -5655,8 +5653,7 @@ mdb_cmp_int(const MDB_val *a, const MDB_val *b)
 /** Compare two items pointing at unsigned ints of unknown alignment.
  *	Nodes and keys are guaranteed to be 2-byte aligned.
  */
-static int
-mdb_cmp_cint(const MDB_val *a, const MDB_val *b)
+static int mdb_cmp_cint(const MDB_val *a, const MDB_val *b)
 {
 #if BYTE_ORDER == LITTLE_ENDIAN
 	unsigned short *u, *c;
@@ -6386,8 +6383,7 @@ mdb_cursor_next(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op)
 		}
 	}
 
-	DPRINTF(("cursor_next: top page is %"Yu" in cursor %p",
-		mdb_dbg_pgno(mp), (void *) mc));
+	DPRINTF(("cursor_next: top page is %"Yu" in cursor %p", mdb_dbg_pgno(mp), (void *) mc));
 	if (mc->mc_flags & C_DEL) {
 		mc->mc_flags ^= C_DEL;
 		goto skip;
@@ -7579,9 +7575,7 @@ bad_sub:
 	return rc;
 }
 
-int
-mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data,
-    unsigned int flags)
+int mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data,unsigned int flags)
 {
 	DKBUF;
 	DDBUF;
@@ -8164,8 +8158,7 @@ static void mdb_cursor_init(MDB_cursor *mc, MDB_txn *txn, MDB_dbi dbi, MDB_xcurs
 	DPRINTF(("new cursor %p on db %u, root:%lu",mc,dbi,mc->mc_db->md_root));
 }
 
-int
-mdb_cursor_open(MDB_txn *txn, MDB_dbi dbi, MDB_cursor **ret)
+int mdb_cursor_open(MDB_txn *txn, MDB_dbi dbi, MDB_cursor **ret)
 {
 	MDB_cursor	*mc;
 	size_t size = sizeof(MDB_cursor);
@@ -8254,8 +8247,7 @@ mdb_cursor_count(MDB_cursor *mc, mdb_size_t *countp)
 	return MDB_SUCCESS;
 }
 
-void
-mdb_cursor_close(MDB_cursor *mc)
+void mdb_cursor_close(MDB_cursor *mc)
 {
 	MDB_TRACE(("%p", mc));
 	if (mc) {
@@ -10277,7 +10269,7 @@ mdb_env_info(MDB_env *env, MDB_envinfo *arg)
  * @param[in] dbi A database handle returned by #mdb_dbi_open()
  */
 static void
-mdb_default_cmp(MDB_txn *txn, MDB_dbi dbi)
+mdb_init_default_cmp(MDB_txn *txn, MDB_dbi dbi)
 {
 	uint16_t f = txn->mt_dbs[dbi].md_flags;
 
@@ -10319,13 +10311,13 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 				txn->mt_flags |= MDB_TXN_DIRTY;
 			}
 		}
-		mdb_default_cmp(txn, MAIN_DBI);
+		mdb_init_default_cmp(txn, MAIN_DBI);
 		MDB_TRACE(("%p, (null), %u = %u", txn, flags, MAIN_DBI));
 		return MDB_SUCCESS;
 	}
 
 	if (txn->mt_dbxs[MAIN_DBI].md_cmp == NULL) {
-		mdb_default_cmp(txn, MAIN_DBI);
+		mdb_init_default_cmp(txn, MAIN_DBI);
 	}
 
 	/* Is the DB already open? */
@@ -10403,7 +10395,7 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 
 		memcpy(&txn->mt_dbs[slot], data.mv_data, sizeof(MDB_db));
 		*dbi = slot;
-		mdb_default_cmp(txn, slot);
+		mdb_init_default_cmp(txn, slot);
 		if (!unused) {
 			txn->mt_numdbs++;
 		}

@@ -6,12 +6,48 @@
 #include <getopt.h>
 #include <thread>
 
+#include <midl.h>
 #define B 10240
 
 uint64_t get_cur_us() {
     auto now = std::chrono::steady_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     return now_us.count();
+}
+void print_free_db_item(const MDB_val*key, const MDB_val*val){
+    assert(key->mv_size==8);
+    uint64_t txn_id = *(uint64_t*)key->mv_data;
+    MDB_IDL idl = (MDB_IDL)val->mv_data;
+    assert(val->mv_size>=sizeof(MDB_ID));
+    assert(val->mv_size % sizeof(MDB_ID) == 0);
+    printf("txn id=%lu,page no list:",txn_id);
+    const MDB_ID n=idl[0];
+    for(MDB_ID k=0;k<n;++k){
+        printf("%lu",idl[k+1]);
+    if(k<n-1)
+        printf(",");
+    }
+    printf("\n");
+}
+int mdb_dump_free_page_table(MDB_env *env){
+
+     MDB_txn* txn;
+      int rc = mdb_txn_begin(env, NULL, MDB_RDONLY, &txn);
+      assert(rc==MDB_SUCCESS);
+
+    MDB_cursor *cursor;
+    rc = mdb_cursor_open(txn, 0,&cursor);
+   assert(rc==MDB_SUCCESS);
+
+    MDB_val key,data;
+    MDB_cursor_op op=MDB_FIRST;
+    while((rc=mdb_cursor_get(cursor,&key,&data,op))== MDB_SUCCESS){
+        print_free_db_item(&key,&data);
+        op=MDB_NEXT;
+    }
+    mdb_cursor_close(cursor);
+    mdb_txn_abort(txn);
+    return MDB_SUCCESS;
 }
 
 void dump_stat(MDB_env* env) {
@@ -337,6 +373,10 @@ int main(int argc, char** argv) {
         }
         const unsigned int page_no = atoi(argv[1]);
         mdb_dump_page(env,page_no);
+    } 
+    else if (strcmp(argv[0], "print_free") == 0) {
+      
+       mdb_dump_free_page_table(env);
     } 
     else {
         std::cerr << argv[0] << ": invalid command" << std::endl;
