@@ -1472,7 +1472,7 @@ struct MDB_env {
 	MDB_pgstate	old_pg_state;		/**< state of old pages from freeDB */
 
 
-	MDB_page	*m_free_dpages;		/**< list of malloc'd blocks for re-use */
+	MDB_page	*m_free_mem_pages;		/**< list of malloc'd blocks for re-use */
 	/** IDL of pages that became unused in a write txn */
 	MDB_ID*		m_free_pgs;
 	/** ID2L of pages written during a write txn. Length MDB_IDL_UM_SIZE. */
@@ -2019,9 +2019,9 @@ static MDB_page * mdb_page_malloc(MDB_txn *txn, unsigned num)
 	 * many pages they will be filling in at least up to the last page.
 	 */
 	if (num == 1) {
-		if (env->m_free_dpages) {
-			MDB_page * const p = env->m_free_dpages;
-			env->m_free_dpages = env->m_free_dpages->mp_next;
+		if (env->m_free_mem_pages) {
+			MDB_page * const p = env->m_free_mem_pages;
+			env->m_free_mem_pages = env->m_free_mem_pages->mp_next;
 			return p;
 		}
 		psize -= off = PAGEHDRSZ;
@@ -2047,8 +2047,8 @@ static MDB_page * mdb_page_malloc(MDB_txn *txn, unsigned num)
  */
 static void mdb_page_free(MDB_env *env, MDB_page *mp)
 {
-	mp->mp_next = env->m_free_dpages;
-	env->m_free_dpages = mp;
+	mp->mp_next = env->m_free_mem_pages;
+	env->m_free_mem_pages = mp;
 }
 
 /** Free a dirty page */
@@ -2744,6 +2744,7 @@ fail:
 
 int mdb_env_sync0(MDB_env *env, int force, pgno_t numpgs)
 {
+	DKBUF;
 	int rc = 0;
 	if (env->me_flags & MDB_RDONLY)
 		return EACCES;
@@ -2752,6 +2753,7 @@ int mdb_env_sync0(MDB_env *env, int force, pgno_t numpgs)
 		|| !(env->me_flags & MDB_NOSYNC)
 #endif
 		) {
+		DPRINTF(("fdatasync fd:%d\n",env->me_fd));
 			if (MDB_FDATASYNC(env->me_fd))
 				rc = ErrCode();
 	}
@@ -3481,84 +3483,38 @@ static int mdb_freelist_save(MDB_txn *txn)
  * @param[in] keep number of initial pages in dirty_list to keep dirty.
  * @return 0 on success, non-zero on failure.
  */
-static int
-mdb_page_flush(MDB_txn *txn, int keep)
+static int mdb_page_flush(MDB_txn *txn, int keep)
 {
 	MDB_env		*env = txn->mt_env;
-	MDB_ID2L	dl = txn->mt_u.dirty_list;
-	unsigned	psize = env->me_psize, j;
-	int			i, pagecount = dl[0].mid, rc;
+	MDB_ID2*	dl = txn->mt_u.dirty_list;
+	const unsigned	psize = env->me_psize;
+	int			i, j, rc;
+	const int pagecount = dl[0].mid;
 	size_t		size = 0;
 	MDB_OFF_T	pos = 0;
-	pgno_t		pgno = 0;
-	MDB_page	*dp = NULL;
-#ifdef _WIN32
-	OVERLAPPED	*ov = env->ov;
-	MDB_page	*wdp;
-	int async_i = 0;
-	HANDLE fd = (env->me_flags & MDB_NOSYNC) ? env->me_fd : env->me_ovfd;
-#else
+
 	struct iovec iov[MDB_COMMIT_PAGES];
 	HANDLE fd = env->me_fd;
-#endif
+
 	ssize_t		wsize = 0, wres;
 	MDB_OFF_T	wpos = 0, next_pos = 1; /* impossible pos, so pos != next_pos */
 	int			n = 0;
+	pgno_t		pgno=0;
+	MDB_page	* dp;
 
 	j = i = keep;
-	if (env->me_flags & MDB_WRITEMAP
-#ifdef _WIN32
-		/* In windows, we still do writes to the file (with write-through enabled in sync mode),
-		 * as this is faster than FlushViewOfFile/FlushFileBuffers */
-		&& (env->me_flags & MDB_NOSYNC)
-#endif
-		) {
-		/* Clear dirty flags */
-		while (++i <= pagecount) {
-			dp = dl[i].mptr;
-			/* Don't flush this page yet */
-			if (dp->mp_flags & (P_LOOSE|P_KEEP)) {
-				dp->mp_flags &= ~P_KEEP;
-				dl[++j] = dl[i];
-				continue;
-			}
-			dp->mp_flags &= ~P_DIRTY;
-		}
-		goto done;
-	}
-
-#ifdef _WIN32
-	if (pagecount - keep >= env->ovs) {
-		/* ran out of room in ov array, and re-malloc, copy handles and free previous */
-		int ovs = (pagecount - keep) * 1.5; /* provide extra padding to reduce number of re-allocations */
-		int new_size = ovs * sizeof(OVERLAPPED);
-		ov = malloc(new_size);
-		if (ov == NULL)
-			return ENOMEM;
-		int previous_size = env->ovs * sizeof(OVERLAPPED);
-		memcpy(ov, env->ov, previous_size); /* Copy previous OVERLAPPED data to retain event handles */
-		/* And clear rest of memory */
-		memset(&ov[env->ovs], 0, new_size - previous_size);
-		if (env->ovs > 0) {
-			free(env->ov); /* release previous allocation */
-		}
-
-		env->ov = ov;
-		env->ovs = ovs;
-	}
-#endif
-
 	/* Write the pages */
 	for (;;) {
+		
 		if (++i <= pagecount) {
-			dp = dl[i].mptr;
+			 dp  = dl[i].mptr;
 			/* Don't flush this page yet */
 			if (dp->mp_flags & (P_LOOSE|P_KEEP)) {
 				dp->mp_flags &= ~P_KEEP;
 				dl[i].mid = 0;
 				continue;
 			}
-			pgno = dl[i].mid;
+			pgno  = dl[i].mid;
 			/* clear dirty flag */
 			dp->mp_flags &= ~P_DIRTY;
 			pos = pgno * psize;
@@ -3566,93 +3522,53 @@ mdb_page_flush(MDB_txn *txn, int keep)
 			if (IS_OVERFLOW(dp)) size *= dp->mp_pages;
 		}
 		/* Write up to MDB_COMMIT_PAGES dirty pages at a time. */
-		if (pos!=next_pos || n==MDB_COMMIT_PAGES || wsize+size>MAX_WRITE
-#ifdef _WIN32
-			/* If writemap is enabled, consecutive page positions infer
-			 * contiguous (mapped) memory.
-			 * Otherwise force write pages one at a time.
-			 * Windows actually supports scatter/gather I/O, but only on
-			 * unbuffered file handles. Since we're relying on the OS page
-			 * cache for all our data, that's self-defeating. So we just
-			 * write pages one at a time. We use the ov structure to set
-			 * the write offset, to at least save the overhead of a Seek
-			 * system call.
-			 */
-			|| !(env->me_flags & MDB_WRITEMAP)
-#endif
-			) {
-			if (n) {
-retry_write:
-				/* Write previous page(s) */
-				DPRINTF(("committing page %"Z"u", pgno));
-#ifdef _WIN32
-				OVERLAPPED *this_ov = &ov[async_i];
-				/* Clear status, and keep hEvent, we reuse that */
-				this_ov->Internal = 0;
-				this_ov->Offset = wpos & 0xffffffff;
-				this_ov->OffsetHigh = wpos >> 16 >> 16;
-				if (!F_ISSET(env->me_flags, MDB_NOSYNC) && !this_ov->hEvent) {
-					HANDLE event = CreateEvent(NULL, FALSE, FALSE, NULL);
-					if (!event) {
-						rc = ErrCode();
-						DPRINTF(("CreateEvent: %s", strerror(rc)));
-						return rc;
-					}
-					this_ov->hEvent = event;
+		if (pos!=next_pos || n==MDB_COMMIT_PAGES || wsize+size>MAX_WRITE) {
+				if (n) {
+							retry_write:
+											/* Write previous page(s) */
+											DPRINTF(("committing page %"Z"u", pgno));
+
+							#ifdef MDB_USE_PWRITEV
+											wres = pwritev(fd, iov, n, wpos);
+							#else
+											if (n == 1) {
+												wres = pwrite(fd, iov[0].iov_base, wsize, wpos);
+											} else {
+							retry_seek:
+												if (lseek(fd, wpos, SEEK_SET) == -1) {
+													rc = ErrCode();
+													if (rc == EINTR)
+														goto retry_seek;
+													DPRINTF(("lseek: %s", strerror(rc)));
+													return rc;
+												}
+												wres = writev(fd, iov, n);
+											}
+							#endif
+											if (wres != wsize) {
+												if (wres < 0) {
+													rc = ErrCode();
+													if (rc == EINTR)
+														goto retry_write;
+													DPRINTF(("Write error: %s", strerror(rc)));
+												} else {
+													rc = EIO; /* TODO: Use which error code? */
+													DPUTS("short write, filesystem full?");
+												}
+												return rc;
+											}
+
+											n = 0;
 				}
-				if (!WriteFile(fd, wdp, wsize, NULL, this_ov)) {
-					rc = ErrCode();
-					if (rc != ERROR_IO_PENDING) {
-						DPRINTF(("WriteFile: %d", rc));
-						return rc;
-					}
-				}
-				async_i++;
-#else
-#ifdef MDB_USE_PWRITEV
-				wres = pwritev(fd, iov, n, wpos);
-#else
-				if (n == 1) {
-					wres = pwrite(fd, iov[0].iov_base, wsize, wpos);
-				} else {
-retry_seek:
-					if (lseek(fd, wpos, SEEK_SET) == -1) {
-						rc = ErrCode();
-						if (rc == EINTR)
-							goto retry_seek;
-						DPRINTF(("lseek: %s", strerror(rc)));
-						return rc;
-					}
-					wres = writev(fd, iov, n);
-				}
-#endif
-				if (wres != wsize) {
-					if (wres < 0) {
-						rc = ErrCode();
-						if (rc == EINTR)
-							goto retry_write;
-						DPRINTF(("Write error: %s", strerror(rc)));
-					} else {
-						rc = EIO; /* TODO: Use which error code? */
-						DPUTS("short write, filesystem full?");
-					}
-					return rc;
-				}
-#endif /* _WIN32 */
-				n = 0;
+				if (i > pagecount)
+					break;
+				wpos = pos;
+				wsize = 0;
+
 			}
-			if (i > pagecount)
-				break;
-			wpos = pos;
-			wsize = 0;
-#ifdef _WIN32
-			wdp = dp;
-		}
-#else
-		}
-		iov[n].iov_len = size;
-		iov[n].iov_base = (char *)dp;
-#endif	/* _WIN32 */
+			iov[n].iov_len = size;
+			iov[n].iov_base = (char *)dp;
+
 		DPRINTF(("committing page %"Yu, pgno));
 		next_pos = pos + size;
 		wsize += size;
@@ -3660,25 +3576,6 @@ retry_seek:
 	}
 
 
-#ifdef _WIN32
-	if (!F_ISSET(env->me_flags, MDB_NOSYNC)) {
-		/* Now wait for all the asynchronous/overlapped sync/write-through writes to complete.
-		* We start with the last one so that all the others should already be complete and
-		* we reduce thread suspend/resuming (in practice, typically about 99.5% of writes are
-		* done after the last write is done) */
-		rc = 0;
-		while (--async_i >= 0) {
-			if (ov[async_i].hEvent) {
-				if (!GetOverlappedResult(fd, &ov[async_i], &wres, TRUE)) {
-					rc = ErrCode(); /* Continue on so that all the event signals are reset */
-				}
-			}
-		}
-		if (rc) { /* any error on GetOverlappedResult, exit now */
-			return rc;
-		}
-	}
-#endif	/* _WIN32 */
 
 	if (!(env->me_flags & MDB_WRITEMAP)) {
 		/* Don't free pages when using writemap (can only get here in NOSYNC mode in Windows)
@@ -3686,10 +3583,9 @@ retry_seek:
 		 * Note: for any size >= on-chip cache size, entire on-chip cache is
 		 * flushed.
 		 */
-		CACHEFLUSH(env->m_shmem_data_file, txn->mt_next_pgno * env->me_psize, DCACHE);
 
 		for (i = keep; ++i <= pagecount; ) {
-			dp = dl[i].mptr;
+			MDB_page	* const dp  = dl[i].mptr;
 			/* This is a page we skipped above */
 			if (!dl[i].mid) {
 				dl[++j] = dl[i];
@@ -5294,9 +5190,9 @@ mdb_env_close(MDB_env *env)
 
 	MDB_TRACE(("%p", env));
 	VGMEMP_DESTROY(env);
-	while ((dp = env->m_free_dpages) != NULL) {
+	while ((dp = env->m_free_mem_pages) != NULL) {
 		VGMEMP_DEFINED(&dp->mp_next, sizeof(dp->mp_next));
-		env->m_free_dpages = dp->mp_next;
+		env->m_free_mem_pages = dp->mp_next;
 		free(dp);
 	}
 
@@ -5962,17 +5858,11 @@ mdb_cursor_sibling(MDB_cursor *mc, int move_right)
 	int		 rc;
 	MDB_node	*indx;
 	MDB_page	*mp;
-#ifdef MDB_VL32
-	MDB_page	*op;
-#endif
-
 	if (mc->mc_snum < 2) {
 		return MDB_NOTFOUND;		/* root has no siblings */
 	}
 
-#ifdef MDB_VL32
-	op = mc->mc_pg[mc->mc_top];
-#endif
+
 	mdb_cursor_pop(mc);
 	DPRINTF(("parent page is page %"Yu", index %u",
 		mc->mc_pg[mc->mc_top]->mp_pgno, mc->mc_ki[mc->mc_top]));
