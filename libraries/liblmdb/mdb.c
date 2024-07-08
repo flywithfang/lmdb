@@ -2359,20 +2359,11 @@ static txnid_t mdb_find_oldest_txn_id(MDB_txn *txn)
 static void mdb_page_dirty(MDB_txn *txn, MDB_page *mp)
 {
 	MDB_ID2 mid;
-	int rc, (*insert)(MDB_ID2L, MDB_ID2 *);
-#ifdef _WIN32	/* With Windows we always write dirty pages with WriteFile,
-				 * so we always want them ordered */
-	insert = mdb_mid2l_insert;
-#else			/* but otherwise with writemaps, we just use msync, we
-				 * don't need the ordering and just append */
-	if (txn->txn_flags & MDB_TXN_WRITEMAP)
-		insert = mdb_mid2l_append;
-	else
-		insert = mdb_mid2l_insert;
-#endif
+	int rc;
+
 	mid.mid = mp->mp_pgno;
 	mid.mptr = mp;
-	rc = insert(txn->mt_u.dirty_list, &mid);
+	rc = mdb_mid2l_insert(txn->mt_u.dirty_list, &mid);
 	mdb_tassert(txn, rc == 0);
 	txn->mt_dirty_room--;
 }
@@ -2554,14 +2545,12 @@ static int mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 #endif
 
 search_done:
-	if (env->me_flags & MDB_WRITEMAP) {
-		np = (MDB_page *)(env->m_shmem_data_file + env->me_psize * pgno);
-	} else {
+ 
 		if (!(np = mdb_page_malloc(txn, num))) {
 			rc = ENOMEM;
 			goto fail;
 		}
-	}
+
 	if (i) {
 		mop[0] = mop_len -= num;
 		/* Move any stragglers down */
@@ -2613,8 +2602,7 @@ mdb_page_copy(MDB_page *dst, MDB_page *src, unsigned int psize)
  * @param[out] ret the writable page, if any. ret is unchanged if
  * mp wasn't spilled.
  */
-static int
-mdb_page_unspill(MDB_txn *txn, MDB_page *mp, MDB_page **ret)
+static int mdb_page_unspill(MDB_txn *txn, MDB_page *mp, MDB_page **ret)
 {
 	MDB_env *env = txn->mt_env;
 	const MDB_txn *tx2;
@@ -2634,9 +2622,7 @@ mdb_page_unspill(MDB_txn *txn, MDB_page *mp, MDB_page **ret)
 				num = mp->mp_pages;
 			else
 				num = 1;
-			if (env->me_flags & MDB_WRITEMAP) {
-				np = mp;
-			} else {
+	 {
 				np = mdb_page_malloc(txn, num);
 				if (!np)
 					return ENOMEM;
@@ -3486,9 +3472,9 @@ static int mdb_freelist_save(MDB_txn *txn)
 static int mdb_page_flush(MDB_txn *txn, int keep)
 {
 	MDB_env		*env = txn->mt_env;
-	MDB_ID2*	dl = txn->mt_u.dirty_list;
+	MDB_ID2*	const dl = txn->mt_u.dirty_list;
 	const unsigned	psize = env->me_psize;
-	int			i, j, rc;
+	int			i, rc;
 	const int pagecount = dl[0].mid;
 	size_t		size = 0;
 	MDB_OFF_T	pos = 0;
@@ -3502,7 +3488,7 @@ static int mdb_page_flush(MDB_txn *txn, int keep)
 	pgno_t		pgno=0;
 	MDB_page	* dp;
 
-	j = i = keep;
+	 i = keep;
 	/* Write the pages */
 	for (;;) {
 		
@@ -3522,7 +3508,7 @@ static int mdb_page_flush(MDB_txn *txn, int keep)
 			if (IS_OVERFLOW(dp)) size *= dp->mp_pages;
 		}
 		/* Write up to MDB_COMMIT_PAGES dirty pages at a time. */
-		if (pos!=next_pos || n==MDB_COMMIT_PAGES || wsize+size>MAX_WRITE) {
+		if (pos!=next_pos/*gap!*/ || n==MDB_COMMIT_PAGES || wsize+size>MAX_WRITE) {
 				if (n) {
 							retry_write:
 											/* Write previous page(s) */
@@ -3539,8 +3525,8 @@ static int mdb_page_flush(MDB_txn *txn, int keep)
 													rc = ErrCode();
 													if (rc == EINTR)
 														goto retry_seek;
-													DPRINTF(("lseek: %s", strerror(rc)));
-													return rc;
+														DPRINTF(("lseek: %s", strerror(rc)));
+														return rc;
 												}
 												wres = writev(fd, iov, n);
 											}
@@ -3566,38 +3552,35 @@ static int mdb_page_flush(MDB_txn *txn, int keep)
 				wsize = 0;
 
 			}
+
 			iov[n].iov_len = size;
 			iov[n].iov_base = (char *)dp;
+			n++;
+			DPRINTF(("prepare committing page %"Yu, pgno));
+			next_pos = pos + size;
+			wsize += size;
+		
+	}//loop
 
-		DPRINTF(("committing page %"Yu, pgno));
-		next_pos = pos + size;
-		wsize += size;
-		n++;
-	}
 
-
-
-	if (!(env->me_flags & MDB_WRITEMAP)) {
-		/* Don't free pages when using writemap (can only get here in NOSYNC mode in Windows)
-		 * MIPS has cache coherency issues, this is a no-op everywhere else
-		 * Note: for any size >= on-chip cache size, entire on-chip cache is
-		 * flushed.
-		 */
+	unsigned int 	j=keep;
 
 		for (i = keep; ++i <= pagecount; ) {
 			MDB_page	* const dp  = dl[i].mptr;
 			/* This is a page we skipped above */
 			if (!dl[i].mid) {
-				dl[++j] = dl[i];
+				++j;
+				dl[j] = dl[i];
 				dl[j].mid = dp->mp_pgno;
 				continue;
 			}
 			mdb_dpage_free(env, dp);
 		}
-	}
+	
 
 done:
 	i--;
+	assert(i==pagecount);
 	txn->mt_dirty_room += i - j;
 	dl[0].mid = j;
 	return MDB_SUCCESS;
