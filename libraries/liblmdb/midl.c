@@ -105,7 +105,7 @@ static int mdb_midl_grow( MDB_ID * *idp, int num )
 	return 0;
 }
 
-int mdb_midl_need( MDB_IDL *idp, unsigned num )
+int mdb_midl_expand( MDB_ID* *idp, unsigned num )
 {
 	MDB_IDL ids = *idp;
 	num += ids[0];
@@ -162,19 +162,26 @@ int mdb_midl_append_range( MDB_IDL *idp, MDB_ID id, unsigned n )
 		ids[n--] = id++;
 	return 0;
 }
-
-void mdb_midl_xmerge( MDB_IDL idl, MDB_IDL merge )
+// Merge an IDL onto an IDL. The destination IDL must be big enough.
+void mdb_midl_xmerge( MDB_IDL dst, MDB_IDL merge )
 {
-	MDB_ID old_id, merge_id, i = merge[0], j = idl[0], k = i+j, total = k;
-	idl[0] = (MDB_ID)-1;		/* delimiter for idl scan below */
-	old_id = idl[j];
+	MDB_ID old_id, src;
+	MDB_ID i = merge[0], j = dst[0], k = i+j;
+	const MDB_ID total = k;
+	dst[0] = (MDB_ID)-1;		/* delimiter for dst scan below */
+	old_id = dst[j];//min
+	/*
+	a >f > b > c    
+	d e f
+	a >b>c d> e >f 
+	*/
 	while (i) {
-		merge_id = merge[i--];
-		for (; old_id < merge_id; old_id = idl[--j])
-			idl[k--] = old_id;
-		idl[k--] = merge_id;
+		src = merge[i--];//min
+		for (; old_id < src; old_id = dst[--j])
+			dst[k--] = old_id;
+		dst[k--] = src;
 	}
-	idl[0] = total;
+	dst[0] = total;
 }
 
 /* Quicksort + Insertion sort for small arrays */

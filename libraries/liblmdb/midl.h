@@ -109,7 +109,7 @@ void mdb_midl_shrink(MDB_IDL *idp);
 	 * @param[in] num	Number of elements to make room for.
 	 * @return	0 on success, ENOMEM on failure.
 	 */
-int mdb_midl_need(MDB_IDL *idp, unsigned num);
+int mdb_midl_expand(MDB_IDL *idp, unsigned num);
 
 	/** Append an ID onto an IDL.
 	 * @param[in,out] idp	Address of the IDL to append to.
