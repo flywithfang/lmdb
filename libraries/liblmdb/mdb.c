@@ -322,43 +322,7 @@ typedef SSIZE_T	ssize_t;
 #endif
 
 #ifdef _WIN32
-#define MDB_USE_HASH	1
-#define MDB_PIDLOCK	0
-#define THREAD_RET	DWORD
-#define pthread_t	HANDLE
-#define pthread_mutex_t	HANDLE
-#define pthread_cond_t	HANDLE
-typedef HANDLE mdb_mutex_t, mdb_mutexref_t;
-#define pthread_key_t	DWORD
-#define pthread_self()	GetCurrentThreadId()
-#define pthread_key_create(x,y)	\
-	((*(x) = TlsAlloc()) == TLS_OUT_OF_INDEXES ? ErrCode() : 0)
-#define pthread_key_delete(x)	TlsFree(x)
-#define pthread_getspecific(x)	TlsGetValue(x)
-#define pthread_setspecific(x,y)	(TlsSetValue(x,y) ? 0 : ErrCode())
-#define pthread_mutex_unlock(x)	ReleaseMutex(*x)
-#define pthread_mutex_lock(x)	WaitForSingleObject(*x, INFINITE)
-#define pthread_cond_signal(x)	SetEvent(*x)
-#define pthread_cond_wait(cond,mutex)	do{SignalObjectAndWait(*mutex, *cond, INFINITE, FALSE); WaitForSingleObject(*mutex, INFINITE);}while(0)
-#define THREAD_CREATE(thr,start,arg) \
-	(((thr) = CreateThread(NULL, 0, start, arg, 0, NULL)) ? 0 : ErrCode())
-#define THREAD_FINISH(thr) \
-	(WaitForSingleObject(thr, INFINITE) ? ErrCode() : 0)
-#define LOCK_MUTEX0(mutex)		WaitForSingleObject(mutex, INFINITE)
-#define UNLOCK_MUTEX(mutex)		ReleaseMutex(mutex)
-#define mdb_mutex_consistent(mutex)	0
-#define getpid()	GetCurrentProcessId()
-#define	MDB_FDATASYNC(fd)	(!FlushFileBuffers(fd))
-#define	MDB_MSYNC(addr,len,flags)	(!FlushViewOfFile(addr,len))
-#define	ErrCode()	GetLastError()
-#define GET_PAGESIZE(x) {SYSTEM_INFO si; GetSystemInfo(&si); (x) = si.dwPageSize;}
-#define	close(fd)	(CloseHandle(fd) ? 0 : -1)
-#define	munmap(ptr,len)	UnmapViewOfFile(ptr)
-#ifdef PROCESS_QUERY_LIMITED_INFORMATION
-#define MDB_PROCESS_QUERY_LIMITED_INFORMATION PROCESS_QUERY_LIMITED_INFORMATION
-#else
-#define MDB_PROCESS_QUERY_LIMITED_INFORMATION 0x1000
-#endif
+
 #else
 #define THREAD_RET	void *
 #define THREAD_CREATE(thr,start,arg)	pthread_create(&thr,NULL,start,arg)
@@ -366,13 +330,7 @@ typedef HANDLE mdb_mutex_t, mdb_mutexref_t;
 
 	/** For MDB_LOCK_FORMAT: True if readers take a pid lock in the lockfile */
 #define MDB_PIDLOCK			1
-
-#ifdef MDB_USE_POSIX_SEM
-
-#elif defined MDB_USE_SYSV_SEM
-
-
-#else	/* MDB_USE_POSIX_MUTEX: */
+	/* MDB_USE_POSIX_MUTEX: */
 	/** Shared mutex/semaphore as the original is stored.
 	 *
 	 *	Not for copies.  Instead it can be assigned to an #mdb_mutexref_t.
@@ -392,7 +350,7 @@ typedef pthread_mutex_t *mdb_mutexref_t;
 	/** Mark mutex-protected data as repaired, after death of previous owner.
 	 */
 #define mdb_mutex_consistent(mutex)	pthread_mutex_consistent(mutex)
-#endif	/* MDB_USE_POSIX_SEM || MDB_USE_SYSV_SEM */
+
 
 	/** Get the error code for the last failed system function.
 	 */
@@ -439,11 +397,11 @@ typedef pthread_mutex_t *mdb_mutexref_t;
 	 *	Return 0 on success, nonzero (not rc) on error.
 	 */
 #define LOCK_MUTEX(rc, env, mutex) \
-	(((rc) = LOCK_MUTEX0(mutex)) && \
+	(((rc) = pthread_mutex_lock(mutex)) && \
 	 ((rc) = mdb_mutex_failed(env, mutex, rc)))
 static int mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc);
 #else
-#define LOCK_MUTEX(rc, env, mutex) ((rc) = LOCK_MUTEX0(mutex))
+#define LOCK_MUTEX(rc, env, mutex) ((rc) = pthread_mutex_lock(mutex))
 #define mdb_mutex_failed(env, mutex, rc) (rc)
 #endif
 
@@ -767,13 +725,13 @@ typedef struct MDB_rxbody {
 #define	mr_txnid	mru.mrx.mrb_txnid
 #define	mr_pid	mru.mrx.mrb_pid
 #define	mr_tid	mru.mrx.mrb_tid
-typedef struct MDB_reader {
+typedef struct MDB_reader_entry {
 	union {
 		MDB_rxbody mrx;
 		/** cache line alignment */
 		char pad[(sizeof(MDB_rxbody)+CACHELINE-1) & ~(CACHELINE-1)];
 	} mru;
-} MDB_reader;
+} MDB_reader_entry;
 
 	/** The header for the reader table.
 	 *	The table resides in a memory-mapped file. (This is a different file
@@ -825,7 +783,7 @@ typedef struct MDB_txbody {
 #define mti_mutexid	mt1.mtb.mtb_mutexid
 #define mti_wmutex	mt2.mt2_wmutex
 
-typedef struct MDB_ReaderLockTableHeader {
+typedef struct MDB_reader_LockTableHeader {
 	union {
 		MDB_txbody mtb;
 		char pad[(sizeof(MDB_txbody)+CACHELINE-1) & ~(CACHELINE-1)];
@@ -837,8 +795,8 @@ typedef struct MDB_ReaderLockTableHeader {
 		char pad[(MNAME_LEN+CACHELINE-1) & ~(CACHELINE-1)];
 	} mt2;
 #endif
-	MDB_reader	mti_readers[1];
-} MDB_ReaderLockTableHeader;
+	MDB_reader_entry	mti_readers[1];
+} MDB_reader_LockTableHeader;
 
 	/** Lockfile format signature: version, features and field layout */
 #define MDB_LOCK_FORMAT \
@@ -885,7 +843,7 @@ enum {
 	+ 270 * (MDB_LOCK_TYPE % 120)
 	/* The above is < 270*120 < 2**15 */
 	+ ((sizeof(txnid_t) == 8) << 15)    /* 32bit/64bit */
-	+ ((sizeof(MDB_reader) > CACHELINE) << 16)
+	+ ((sizeof(MDB_reader_entry) > CACHELINE) << 16)
 	/* Not really needed - implied by MDB_LOCK_TYPE != (_WIN32 locking) */
 	+ (((MDB_PIDLOCK) != 0)   << 17)
 	/* 18 bits total: Must be <= (32 - MDB_LOCK_VERSION_BITS). */
@@ -1297,7 +1255,7 @@ struct MDB_txn {
 		/** For write txns: Modified pages. Sorted when not MDB_WRITEMAP. */
 		MDB_ID2 *	dirty_list;
 		/** For read txns: This thread/txn's reader table slot, or NULL. */
-		MDB_reader	*reader;
+		MDB_reader_entry	*reader;
 	} mt_u;
 	/** Array of records for each DB known in the environment. */
 	MDB_dbx		*mt_dbxs;
@@ -1449,14 +1407,14 @@ struct MDB_env {
 	unsigned int	me_psize;	/**< DB page size, inited from me_os_psize */
 	unsigned int	me_os_psize;	/**< OS page size, from #GET_PAGESIZE */
 	unsigned int	me_maxreaders;	/**< size of the reader table */
-	/** Max #MDB_ReaderLockTableHeader.%mti_numreaders of interest to #mdb_env_close() */
+	/** Max #MDB_reader_LockTableHeader.%mti_numreaders of interest to #mdb_env_close() */
 	volatile int	me_close_readers;
 	MDB_dbi		me_numdbs;		/**< number of DBs opened */
 	MDB_dbi		m_maxdbs;		/**< size of the DB table */
 	MDB_PID_T	me_pid;		/**< process ID of this env */
 	char		*me_path;		/**< path to the DB files */
 	char		*m_shmem_data_file;		/**< the memory map of the data file */
-	MDB_ReaderLockTableHeader	*me_txns;		/**< the memory map of the lock file or NULL */
+	MDB_reader_LockTableHeader	*me_txns;		/**< the memory map of the lock file or NULL */
 	MDB_meta	*me_metas[NUM_METAS];	/**< pointers to the two meta pages */
 	void		*me_pbuf;		/**< scratch area for DUPSORT put() */
 	MDB_txn		*me_txn;		/**< current write transaction */
@@ -1490,17 +1448,10 @@ struct MDB_env {
 	OVERLAPPED	*ov;			/**< Used for for overlapping I/O requests */
 	int		ovs;				/**< Count of OVERLAPPEDs */
 #endif
-#ifdef MDB_USE_POSIX_MUTEX	/* Posix mutexes reside in shared mem */
+/* Posix mutexes reside in shared mem */
 #	define		me_rmutex	me_txns->mti_rmutex /**< Shared reader lock */
 #	define		me_wmutex	me_txns->mti_wmutex /**< Shared writer lock */
-#else
-	mdb_mutex_t	me_rmutex;
-	mdb_mutex_t	me_wmutex;
-# if defined(_WIN32) 
-	/** Half-initialized name of mutexes, to be completed by #MUTEXNAME() */
-	char		me_mutexname[sizeof(MUTEXNAME_PREFIX) + 11];
-# endif
-#endif
+
 
 	void		*me_userctx;	 /**< User-settable context */
 	MDB_assert_func *me_assert_func; /**< Callback for assertion failures */
@@ -1604,7 +1555,7 @@ static void	mdb_xcursor_init2(MDB_cursor *mc, MDB_xcursor *src_mx, int force);
 
 static int	mdb_drop0(MDB_cursor *mc, int subs);
 static void mdb_init_default_cmp(MDB_txn *txn, MDB_dbi dbi);
-static int mdb_reader_check0(MDB_env *env, int rlocked, int *dead);
+static int MDB_reader_entry_check0(MDB_env *env, int rlocked, int *dead);
 
 /** @cond */
 static MDB_cmp_func	mdb_cmp_memn, mdb_cmp_memnr, mdb_cmp_int, mdb_cmp_cint, mdb_cmp_long;
@@ -2341,7 +2292,7 @@ static txnid_t mdb_find_oldest_txn_id(MDB_txn *txn)
 	int i;
 	txnid_t mr, oldest = txn->m_txnid - 1;
 	if (txn->mt_env->me_txns) {
-		MDB_reader *r = txn->mt_env->me_txns->mti_readers;
+		MDB_reader_entry *r = txn->mt_env->me_txns->mti_readers;
 		for (i = txn->mt_env->me_txns->mti_numreaders; --i >= 0; ) {
 			if (r[i].mr_pid) {
 				mr = r[i].mr_txnid;
@@ -2815,15 +2766,10 @@ static void mdb_cursors_close(MDB_txn *txn, unsigned merge)
 	}
 }
 
-#if !(MDB_PIDLOCK)		/* Currently the same as defined(_WIN32) */
-enum Pidlock_op {
-	Pidset, Pidcheck
-};
-#else
 enum Pidlock_op {
 	Pidset = F_SETLK, Pidcheck = F_GETLK
 };
-#endif
+
 
 /** Set or check a pid lock. Set returns 0 on success.
  * Check returns 0 if the process is certainly dead, nonzero if it may
@@ -2833,23 +2779,9 @@ enum Pidlock_op {
  * of the process with the given pid. On POSIX we use a single byte
  * lock on the lockfile, set at an offset equal to the pid.
  */
-static int
-mdb_reader_pid(MDB_env *env, enum Pidlock_op op, MDB_PID_T pid)
+static int MDB_reader_entry_pid(MDB_env *env, enum Pidlock_op op, MDB_PID_T pid)
 {
-#if !(MDB_PIDLOCK)		/* Currently the same as defined(_WIN32) */
-	int ret = 0;
-	HANDLE h;
-	if (op == Pidcheck) {
-		h = OpenProcess(env->me_pidquery, FALSE, pid);
-		/* No documented "no such process" code, but other program use this: */
-		if (!h)
-			return ErrCode() != ERROR_INVALID_PARAMETER;
-		/* A process exists until all handles to it close. Has it exited? */
-		ret = WaitForSingleObject(h, 0) != 0;
-		CloseHandle(h);
-	}
-	return ret;
-#else
+
 	for (;;) {
 		int rc;
 		struct flock lock_info;
@@ -2866,7 +2798,7 @@ mdb_reader_pid(MDB_env *env, enum Pidlock_op op, MDB_PID_T pid)
 		}
 		return rc;
 	}
-#endif
+
 }
 
 /** Common code for #mdb_txn_begin() and #mdb_txn_renew().
@@ -2876,7 +2808,7 @@ mdb_reader_pid(MDB_env *env, enum Pidlock_op op, MDB_PID_T pid)
 static int mdb_txn_renew0(MDB_txn *txn)
 {
 	MDB_env *env = txn->mt_env;
-	MDB_ReaderLockTableHeader *ti = env->me_txns;
+	MDB_reader_LockTableHeader * const ti = env->me_txns;
 	MDB_meta *meta;
 	unsigned int i, nr, flags = txn->txn_flags;
 	uint16_t x;
@@ -2888,8 +2820,7 @@ static int mdb_txn_renew0(MDB_txn *txn)
 			txn->m_txnid = meta->mm_txnid;
 			txn->mt_u.reader = NULL;
 		} else {
-			MDB_reader *r = (env->me_flags & MDB_NOTLS) ? txn->mt_u.reader :
-				pthread_getspecific(env->me_txkey);
+			MDB_reader_entry *r = (env->me_flags & MDB_NOTLS) ? txn->mt_u.reader : pthread_getspecific(env->me_txkey);
 			if (r) {
 				if (r->mr_pid != env->me_pid || r->mr_txnid != (txnid_t)-1)
 					return MDB_BAD_RSLOT;
@@ -2899,7 +2830,7 @@ static int mdb_txn_renew0(MDB_txn *txn)
 				mdb_mutexref_t rmutex = env->me_rmutex;
 
 				if (!env->me_live_reader) {
-					rc = mdb_reader_pid(env, Pidset, pid);
+					rc = MDB_reader_entry_pid(env, F_SETLK, pid);
 					if (rc)
 						return rc;
 					env->me_live_reader = 1;
@@ -2937,9 +2868,11 @@ static int mdb_txn_renew0(MDB_txn *txn)
 					return rc;
 				}
 			}
+
 			do /* LY: Retry on a race, ITS#7970. */
 				r->mr_txnid = ti->mti_txnid;
 			while(r->mr_txnid != ti->mti_txnid);
+
 			if (!r->mr_txnid && (env->me_flags & MDB_RDONLY)) {
 				meta = mdb_env_pick_meta(env);
 				r->mr_txnid = meta->mm_txnid;
@@ -4204,9 +4137,7 @@ mdb_fname_init(const char *path, unsigned envflags, MDB_name *fname)
 
 /** File type, access mode etc. for #mdb_fopen() */
 enum mdb_fopen_type {
-#ifdef _WIN32
-	MDB_O_RDONLY, MDB_O_RDWR, MDB_O_OVERLAPPED, MDB_O_META, MDB_O_COPY, MDB_O_LOCKS
-#else
+
 	/* A comment in mdb_fopen() explains some O_* flag choices. */
 	MDB_O_RDONLY= O_RDONLY,                            /**< for RDONLY me_fd */
 	MDB_O_RDWR  = O_RDWR  |O_CREAT,                    /**< for me_fd */
@@ -4217,7 +4148,7 @@ enum mdb_fopen_type {
 	 */
 	MDB_O_MASK  = MDB_O_RDWR|MDB_CLOEXEC | MDB_O_RDONLY|MDB_O_META|MDB_O_COPY,
 	MDB_O_LOCKS = MDB_O_RDWR|MDB_CLOEXEC | ((MDB_O_MASK+1) & ~MDB_O_MASK) /**< for me_lfd */
-#endif
+
 };
 
 /** Open an LMDB file.
@@ -4466,14 +4397,11 @@ static int ESECT mdb_env_open2(MDB_env *env, int prev)
  *	This function is called automatically when a thread exits.
  * @param[in] ptr This points to the slot in the reader lock table.
  */
-static void
-mdb_env_reader_dest(void *ptr)
+static void mdb_env_reader_dest(void *ptr)
 {
-	MDB_reader *reader = ptr;
+	MDB_reader_entry *reader = ptr;
 
-#ifndef _WIN32
 	if (reader->mr_pid == getpid()) /* catch pthread_exit() in child process */
-#endif
 		/* We omit the mutex, so do this atomically (i.e. skip mr_txnid) */
 		reader->mr_pid = 0;
 }
@@ -4498,7 +4426,7 @@ static void NTAPI mdb_tls_callback(PVOID module, DWORD reason, PVOID ptr)
 	case DLL_THREAD_ATTACH: break;
 	case DLL_THREAD_DETACH:
 		for (i=0; i<mdb_tls_nkeys; i++) {
-			MDB_reader *r = pthread_getspecific(mdb_tls_keys[i]);
+			MDB_reader_entry *r = pthread_getspecific(mdb_tls_keys[i]);
 			if (r) {
 				mdb_env_reader_dest(r);
 			}
@@ -4536,29 +4464,13 @@ PIMAGE_TLS_CALLBACK mdb_tls_cbp = mdb_tls_callback;
 #endif
 
 /** Downgrade the exclusive lock on the region back to shared */
-static int ESECT
-mdb_env_share_locks(MDB_env *env, int *excl)
+static int ESECT mdb_env_share_locks(MDB_env *env, int *excl)
 {
 	int rc = 0;
 	MDB_meta *meta = mdb_env_pick_meta(env);
 
 	env->me_txns->mti_txnid = meta->mm_txnid;
 
-#ifdef _WIN32
-	{
-		OVERLAPPED ov;
-		/* First acquire a shared lock. The Unlock will
-		 * then release the existing exclusive lock.
-		 */
-		memset(&ov, 0, sizeof(ov));
-		if (!LockFileEx(env->me_lfd, 0, 0, 1, 0, &ov)) {
-			rc = ErrCode();
-		} else {
-			UnlockFile(env->me_lfd, 0, 0, 1, 0);
-			*excl = 0;
-		}
-	}
-#else
 	{
 		struct flock lock_info;
 		/* The shared lock replaces the existing lock */
@@ -4567,11 +4479,10 @@ mdb_env_share_locks(MDB_env *env, int *excl)
 		lock_info.l_whence = SEEK_SET;
 		lock_info.l_start = 0;
 		lock_info.l_len = 1;
-		while ((rc = fcntl(env->me_lfd, F_SETLK, &lock_info)) &&
-				(rc = ErrCode()) == EINTR) ;
+		while ((rc = fcntl(env->me_lfd, F_SETLK, &lock_info)) && (rc = ErrCode()) == EINTR) ;
 		*excl = rc ? -1 : 0;	/* error may mean we lost the lock */
 	}
-#endif
+
 
 	return rc;
 }
@@ -4579,22 +4490,11 @@ mdb_env_share_locks(MDB_env *env, int *excl)
 /** Try to get exclusive lock, otherwise shared.
  *	Maintain *excl = -1: no/unknown lock, 0: shared, 1: exclusive.
  */
-static int ESECT
-mdb_env_excl_lock(MDB_env *env, int *excl)
+static int ESECT mdb_env_excl_lock(MDB_env *env, int *excl)
 {
 	int rc = 0;
 #ifdef _WIN32
-	if (LockFile(env->me_lfd, 0, 0, 1, 0)) {
-		*excl = 1;
-	} else {
-		OVERLAPPED ov;
-		memset(&ov, 0, sizeof(ov));
-		if (LockFileEx(env->me_lfd, 0, 0, 1, 0, &ov)) {
-			*excl = 0;
-		} else {
-			rc = ErrCode();
-		}
-	}
+
 #else
 	struct flock lock_info;
 	memset((void *)&lock_info, 0, sizeof(lock_info));
@@ -4721,11 +4621,8 @@ static int ESECT mdb_env_setup_locks(MDB_env *env, MDB_name *fname, int mode, in
 {
 	DKBUF;
 
-#ifdef _WIN32
-#	define MDB_ERRCODE_ROFS	ERROR_WRITE_PROTECT
-#else
 #	define MDB_ERRCODE_ROFS	EROFS
-#endif
+
 
 	int rc;
 	MDB_OFF_T size, rsize;
@@ -4744,14 +4641,7 @@ static int ESECT mdb_env_setup_locks(MDB_env *env, MDB_name *fname, int mode, in
 		if (rc)
 			goto fail;
 		env->me_flags |= MDB_ENV_TXKEY;
-#ifdef _WIN32
-		/* Windows TLS callbacks need help finding their TLS info. */
-		if (mdb_tls_nkeys >= MAX_TLS_KEYS) {
-			rc = MDB_TLS_FULL;
-			goto fail;
-		}
-		mdb_tls_keys[mdb_tls_nkeys++] = env->me_txkey;
-#endif
+
 	}
 
 	/* Try to get exclusive lock. If we succeed, then
@@ -4759,74 +4649,32 @@ static int ESECT mdb_env_setup_locks(MDB_env *env, MDB_name *fname, int mode, in
 	 */
 	if ((rc = mdb_env_excl_lock(env, excl))) goto fail;
 
-#ifdef _WIN32
-	size = GetFileSize(env->me_lfd, NULL);
-#else
+
 	size = lseek(env->me_lfd, 0, SEEK_END);
 	if (size == -1) goto fail_errno;
-#endif
-	rsize = (env->me_maxreaders-1) * sizeof(MDB_reader) + sizeof(MDB_ReaderLockTableHeader);
+
+	rsize = (env->me_maxreaders-1) * sizeof(MDB_reader_entry) + sizeof(MDB_reader_LockTableHeader);
 	DPRINTF(("read lock file size %ld, max_readers:%u",rsize,env->me_maxreaders));
 	if (size < rsize && *excl > 0) {
-#ifdef _WIN32
-		if (SetFilePointer(env->me_lfd, rsize, NULL, FILE_BEGIN) != (DWORD)rsize
-			|| !SetEndOfFile(env->me_lfd))
-			goto fail_errno;
-#else
+
 		if (ftruncate(env->me_lfd, rsize) != 0) 
 			goto fail_errno;
 		DPRINTF(("truncate read lock file size %ld,fd=%d",rsize,env->me_lfd));
-#endif
+
 	} else {
 		rsize = size;
-		size = rsize - sizeof(MDB_ReaderLockTableHeader);
-		env->me_maxreaders = size/sizeof(MDB_reader) + 1;
+		size = rsize - sizeof(MDB_reader_LockTableHeader);
+		env->me_maxreaders = size/sizeof(MDB_reader_entry) + 1;
 	}
 	{
-#ifdef _WIN32
-		HANDLE mh;
-		mh = CreateFileMapping(env->me_lfd, NULL, PAGE_READWRITE,
-			0, 0, NULL);
-		if (!mh) goto fail_errno;
-		env->me_txns = MapViewOfFileEx(mh, FILE_MAP_WRITE, 0, 0, rsize, NULL);
-		CloseHandle(mh);
-		if (!env->me_txns) goto fail_errno;
-#else
+
 		void *m = mmap(NULL, rsize, PROT_READ|PROT_WRITE, MAP_SHARED,env->me_lfd, 0);
 		if (m == MAP_FAILED) goto fail_errno;
 		env->me_txns = m;
-#endif
+
 	}
 	if (*excl > 0) {
-#ifdef _WIN32
-		BY_HANDLE_FILE_INFORMATION stbuf;
-		struct {
-			DWORD volume;
-			DWORD nhigh;
-			DWORD nlow;
-		} idbuf;
-
-		if (!mdb_sec_inited) {
-			InitializeSecurityDescriptor(&mdb_null_sd,
-				SECURITY_DESCRIPTOR_REVISION);
-			SetSecurityDescriptorDacl(&mdb_null_sd, TRUE, 0, FALSE);
-			mdb_all_sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-			mdb_all_sa.bInheritHandle = FALSE;
-			mdb_all_sa.lpSecurityDescriptor = &mdb_null_sd;
-			mdb_sec_inited = 1;
-		}
-		if (!GetFileInformationByHandle(env->me_lfd, &stbuf)) goto fail_errno;
-		idbuf.volume = stbuf.dwVolumeSerialNumber;
-		idbuf.nhigh  = stbuf.nFileIndexHigh;
-		idbuf.nlow   = stbuf.nFileIndexLow;
-		env->me_txns->mti_mutexid = mdb_hash(&idbuf, sizeof(idbuf));
-		mdb_env_mname_init(env);
-		env->me_rmutex = CreateMutexA(&mdb_all_sa, FALSE, MUTEXNAME(env, 'r'));
-		if (!env->me_rmutex) goto fail_errno;
-		env->me_wmutex = CreateMutexA(&mdb_all_sa, FALSE, MUTEXNAME(env, 'w'));
-		if (!env->me_wmutex) goto fail_errno;
-
-#else	/* MDB_USE_POSIX_MUTEX: */
+	/* MDB_USE_POSIX_MUTEX: */
 		pthread_mutexattr_t mattr;
 
 		/* Solaris needs this before initing a robust mutex.  Otherwise
@@ -4847,7 +4695,7 @@ static int ESECT mdb_env_setup_locks(MDB_env *env, MDB_name *fname, int mode, in
 		pthread_mutexattr_destroy(&mattr);
 		if (rc)
 			goto fail;
-#endif	/* _WIN32 || ... */
+
 
 		env->me_txns->mti_magic = MDB_MAGIC;
 		env->me_txns->mti_format = MDB_LOCK_FORMAT;
@@ -4957,11 +4805,7 @@ int ESECT mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_m
 	rc = mdb_fopen(env, &fname,(flags & MDB_RDONLY) ? MDB_O_RDONLY : MDB_O_RDWR, mode, &env->me_fd);
 	if (rc)
 		goto leave;
-#ifdef _WIN32
-	rc = mdb_fopen(env, &fname, MDB_O_OVERLAPPED, mode, &env->me_ovfd);
-	if (rc)
-		goto leave;
-#endif
+
 
 	if ((flags & (MDB_RDONLY|MDB_NOLOCK)) == MDB_RDONLY) {
 		rc = mdb_env_setup_locks(env, &fname, mode, &excl);
@@ -5046,15 +4890,6 @@ static void ESECT mdb_env_close0(MDB_env *env, int excl)
 
 	if (env->me_flags & MDB_ENV_TXKEY) {
 		pthread_key_delete(env->me_txkey);
-#ifdef _WIN32
-		/* Delete our key from the global list */
-		for (i=0; i<mdb_tls_nkeys; i++)
-			if (mdb_tls_keys[i] == env->me_txkey) {
-				mdb_tls_keys[i] = mdb_tls_keys[mdb_tls_nkeys-1];
-				mdb_tls_nkeys--;
-				break;
-			}
-#endif
 	}
 
 	if (env->m_shmem_data_file) {
@@ -5124,7 +4959,7 @@ static void ESECT mdb_env_close0(MDB_env *env, int excl)
 				semctl(env->me_rmutex->semid, 0, IPC_RMID);
 		}
 #endif
-		munmap((void *)env->me_txns, (env->me_maxreaders-1)*sizeof(MDB_reader)+sizeof(MDB_ReaderLockTableHeader));
+		munmap((void *)env->me_txns, (env->me_maxreaders-1)*sizeof(MDB_reader_entry)+sizeof(MDB_reader_LockTableHeader));
 	}
 	if (env->me_lfd != INVALID_HANDLE_VALUE) {
 #ifdef _WIN32
@@ -10158,10 +9993,10 @@ mdb_env_get_maxkeysize(MDB_env *env)
 }
 
 int ESECT
-mdb_reader_list(MDB_env *env, MDB_msg_func *func, void *ctx)
+MDB_reader_entry_list(MDB_env *env, MDB_msg_func *func, void *ctx)
 {
 	unsigned int i, rdrs;
-	MDB_reader *mr;
+	MDB_reader_entry *mr;
 	char buf[64];
 	int rc = 0, first = 1;
 
@@ -10236,22 +10071,22 @@ mdb_pid_insert(MDB_PID_T *ids, MDB_PID_T pid)
 }
 
 int ESECT
-mdb_reader_check(MDB_env *env, int *dead)
+MDB_reader_entry_check(MDB_env *env, int *dead)
 {
 	if (!env)
 		return EINVAL;
 	if (dead)
 		*dead = 0;
-	return env->me_txns ? mdb_reader_check0(env, 0, dead) : MDB_SUCCESS;
+	return env->me_txns ? MDB_reader_entry_check0(env, 0, dead) : MDB_SUCCESS;
 }
 
-/** As #mdb_reader_check(). \b rlocked is set if caller locked #me_rmutex. */
+/** As #MDB_reader_entry_check(). \b rlocked is set if caller locked #me_rmutex. */
 static int ESECT
-mdb_reader_check0(MDB_env *env, int rlocked, int *dead)
+MDB_reader_entry_check0(MDB_env *env, int rlocked, int *dead)
 {
 	mdb_mutexref_t rmutex = rlocked ? NULL : env->me_rmutex;
 	unsigned int i, j, rdrs;
-	MDB_reader *mr;
+	MDB_reader_entry *mr;
 	MDB_PID_T *pids, pid;
 	int rc = MDB_SUCCESS, count = 0;
 
@@ -10265,7 +10100,7 @@ mdb_reader_check0(MDB_env *env, int rlocked, int *dead)
 		pid = mr[i].mr_pid;
 		if (pid && pid != env->me_pid) {
 			if (mdb_pid_insert(pids, pid) == 0) {
-				if (!mdb_reader_pid(env, Pidcheck, pid)) {
+				if (!MDB_reader_entry_pid(env, Pidcheck, pid)) {
 					/* Stale reader found */
 					j = i;
 					if (rmutex) {
@@ -10275,7 +10110,7 @@ mdb_reader_check0(MDB_env *env, int rlocked, int *dead)
 							rdrs = 0; /* the above checked all readers */
 						} else {
 							/* Recheck, a new process may have reused pid */
-							if (mdb_reader_pid(env, Pidcheck, pid))
+							if (MDB_reader_entry_pid(env, Pidcheck, pid))
 								j = rdrs;
 						}
 					}
@@ -10306,8 +10141,7 @@ mdb_reader_check0(MDB_env *env, int rlocked, int *dead)
  * @param[in] rc	LOCK_MUTEX0() error (nonzero)
  * @return 0 on success with the mutex locked, or an error code on failure.
  */
-static int ESECT
-mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc)
+static int ESECT mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc)
 {
 	int rlocked, rc2;
 	MDB_meta *meta;
@@ -10331,7 +10165,7 @@ mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc)
 		}
 		DPRINTF(("%cmutex owner died, %s", (rlocked ? 'r' : 'w'),
 			(rc ? "this process' env is hosed" : "recovering")));
-		rc2 = mdb_reader_check0(env, rlocked, NULL);
+		rc2 = MDB_reader_entry_check0(env, rlocked, NULL);
 		if (rc2 == 0)
 			rc2 = mdb_mutex_consistent(mutex);
 		if (rc || (rc = rc2)) {
@@ -10339,9 +10173,7 @@ mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc)
 			UNLOCK_MUTEX(mutex);
 		}
 	} else {
-#ifdef _WIN32
-		rc = ErrCode();
-#endif
+
 		DPRINTF(("LOCK_MUTEX failed, %s", mdb_strerror(rc)));
 	}
 
