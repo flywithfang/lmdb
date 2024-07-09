@@ -9913,8 +9913,7 @@ int ESECT mdb_reader_list(MDB_env *env, MDB_msg_func *func, void *ctx)
 /** Insert pid into list if not already present.
  * return -1 if already present.
  */
-static int ESECT
-mdb_pid_insert(MDB_PID_T *ids, MDB_PID_T pid)
+static int ESECT mdb_pid_insert(MDB_PID_T *ids, MDB_PID_T pid)
 {
 	/* binary search of pid in list */
 	unsigned base = 0;
@@ -9964,8 +9963,7 @@ static int ESECT MDB_reader_entry_check0(MDB_env *env, int rlocked, int *dead)
 {
 	mdb_mutexref_t rmutex = rlocked ? NULL : env->me_rmutex;
 	unsigned int i, j, rdrs;
-	MDB_reader_entry *mr;
-	MDB_PID_T *pids, pid;
+	MDB_PID_T *pids;
 	int rc = MDB_SUCCESS, count = 0;
 
 	rdrs = env->m_reader_table->mti_numreaders;
@@ -9973,9 +9971,9 @@ static int ESECT MDB_reader_entry_check0(MDB_env *env, int rlocked, int *dead)
 	if (!pids)
 		return ENOMEM;
 	pids[0] = 0;
-	mr = env->m_reader_table->mti_readers;
+	MDB_reader_entry * const mr = env->m_reader_table->mti_readers;
 	for (i=0; i<rdrs; i++) {
-		pid = mr[i].mr_pid;
+		const MDB_PID_T pid = mr[i].mr_pid;
 		if (pid && pid != env->me_pid) {
 			if (mdb_pid_insert(pids, pid) == 0) {
 				if (!MDB_reader_entry_pid(env, F_GETLK, pid)) {
