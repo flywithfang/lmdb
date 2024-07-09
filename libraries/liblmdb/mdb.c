@@ -41,67 +41,6 @@
 #define _FILE_OFFSET_BITS	64
 #endif
 #ifdef _WIN32
-#include <malloc.h>
-#include <windows.h>
-#include <wchar.h>				/* get wcscpy() */
-
-/* We use native NT APIs to setup the memory map, so that we can
- * let the DB file grow incrementally instead of always preallocating
- * the full size. These APIs are defined in <wdm.h> and <ntifs.h>
- * but those headers are meant for driver-level development and
- * conflict with the regular user-level headers, so we explicitly
- * declare them here. We get pointers to these functions from
- * NTDLL.DLL at runtime, to avoid buildtime dependencies on any
- * NTDLL import libraries.
- */
-typedef NTSTATUS (WINAPI NtCreateSectionFunc)
-  (OUT PHANDLE sh, IN ACCESS_MASK acc,
-  IN void * oa OPTIONAL,
-  IN PLARGE_INTEGER ms OPTIONAL,
-  IN ULONG pp, IN ULONG aa, IN HANDLE fh OPTIONAL);
-
-static NtCreateSectionFunc *NtCreateSection;
-
-typedef enum _SECTION_INHERIT {
-	ViewShare = 1,
-	ViewUnmap = 2
-} SECTION_INHERIT;
-
-typedef NTSTATUS (WINAPI NtMapViewOfSectionFunc)
-  (IN PHANDLE sh, IN HANDLE ph,
-  IN OUT PVOID *addr, IN ULONG_PTR zbits,
-  IN SIZE_T cs, IN OUT PLARGE_INTEGER off OPTIONAL,
-  IN OUT PSIZE_T vs, IN SECTION_INHERIT ih,
-  IN ULONG at, IN ULONG pp);
-
-static NtMapViewOfSectionFunc *NtMapViewOfSection;
-
-typedef NTSTATUS (WINAPI NtCloseFunc)(HANDLE h);
-
-static NtCloseFunc *NtClose;
-
-/** getpid() returns int; MinGW defines pid_t but MinGW64 typedefs it
- *  as int64 which is wrong. MSVC doesn't define it at all, so just
- *  don't use it.
- */
-#define MDB_PID_T	int
-#define MDB_THR_T	DWORD
-#include <sys/types.h>
-#include <sys/stat.h>
-
-#ifdef __GNUC__
-# include <sys/param.h>
-#else
-# define LITTLE_ENDIAN	1234
-# define BIG_ENDIAN	4321
-# define BYTE_ORDER	LITTLE_ENDIAN
-# ifndef SSIZE_MAX
-#  define SSIZE_MAX	INT_MAX
-# endif
-
-#endif
-
-#define MDB_OFF_T	int64_t
 
 #else// non win32
 #include <sys/types.h>
@@ -279,9 +218,9 @@ typedef SSIZE_T	ssize_t;
 /* Internal error codes, not exposed outside liblmdb */
 #define	MDB_NO_ROOT		(MDB_LAST_ERRCODE + 10)
 #ifdef _WIN32
-#define MDB_OWNERDEAD	((int) WAIT_ABANDONED)
+
 #elif defined MDB_USE_SYSV_SEM
-#define MDB_OWNERDEAD	(MDB_LAST_ERRCODE + 11)
+
 #elif defined(MDB_USE_POSIX_MUTEX) && defined(EOWNERDEAD)
 #define MDB_OWNERDEAD	EOWNERDEAD	/**< #LOCK_MUTEX0() result if dead owner */
 #endif
@@ -307,15 +246,6 @@ typedef SSIZE_T	ssize_t;
 # endif
 #endif /* !MDB_USE_ROBUST */
 
-#if defined(MDB_USE_POSIX_MUTEX) && (MDB_USE_ROBUST)
-/* glibc < 2.12 only provided _np API */
-#  if (defined(__GLIBC__) && GLIBC_VER < 0x02000c) || \
-	(defined(PTHREAD_MUTEX_ROBUST_NP) && !defined(PTHREAD_MUTEX_ROBUST))
-#   define PTHREAD_MUTEX_ROBUST	PTHREAD_MUTEX_ROBUST_NP
-#   define pthread_mutexattr_setrobust(attr, flag)	pthread_mutexattr_setrobust_np(attr, flag)
-#   define pthread_mutex_consistent(mutex)	pthread_mutex_consistent_np(mutex)
-#  endif
-#endif /* MDB_USE_POSIX_MUTEX && MDB_USE_ROBUST */
 
 #if defined(MDB_OWNERDEAD) && (MDB_USE_ROBUST)
 #define MDB_ROBUST_SUPPORTED	1
@@ -344,9 +274,6 @@ typedef pthread_mutex_t *mdb_mutexref_t;
 	/** Unlock the reader or writer mutex.
 	 */
 #define UNLOCK_MUTEX(mutex)	pthread_mutex_unlock(mutex)
-	/** Mark mutex-protected data as repaired, after death of previous owner.
-	 */
-#define mdb_mutex_consistent(mutex)	pthread_mutex_consistent(mutex)
 
 
 	/** Get the error code for the last failed system function.
@@ -1604,9 +1531,7 @@ static char *const mdb_errstr[] = {
 	"MDB_PROBLEM: Unexpected problem - txn should abort",
 };
 
-#ifdef MDB_USE_SYSV_SEM
- xxx
-#endif
+
 char *
 mdb_strerror(int err)
 {
@@ -1629,28 +1554,7 @@ mdb_strerror(int err)
 	}
 
 #ifdef _WIN32
-	/* These are the C-runtime error codes we use. The comment indicates
-	 * their numeric value, and the Win32 error they would correspond to
-	 * if the error actually came from a Win32 API. A major mess, we should
-	 * have used LMDB-specific error codes for everything.
-	 */
-	switch(err) {
-	case ENOENT:	/* 2, FILE_NOT_FOUND */
-	case EIO:		/* 5, ACCESS_DENIED */
-	case ENOMEM:	/* 12, INVALID_ACCESS */
-	case EACCES:	/* 13, INVALID_DATA */
-	case EBUSY:		/* 16, CURRENT_DIRECTORY */
-	case EINVAL:	/* 22, BAD_COMMAND */
-	case ENOSPC:	/* 28, OUT_OF_PAPER */
-		return strerror(err);
-	default:
-		;
-	}
-	buf[0] = 0;
-	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM |
-		FORMAT_MESSAGE_IGNORE_INSERTS,
-		NULL, err, 0, ptr, MSGSIZE, NULL);
-	return ptr;
+
 #else
 	if (err < 0)
 		return "Invalid error code";
@@ -2798,13 +2702,8 @@ static int mdb_txn_renew0(MDB_txn *txn)
 	unsigned int i, nr, flags = txn->txn_flags;
 	uint16_t x;
 	int rc, new_notls = 0;
-
-	if ((flags &= MDB_TXN_RDONLY) != 0) {//readonly
-		if (!reader_table) {
-			meta = mdb_env_pick_meta(env);
-			txn->m_txnid = meta->mm_txnid;
-			txn->mt_u.reader = NULL;
-		} else {
+	const bool readonly_txn= (flags &= MDB_TXN_RDONLY != 0);
+	if (readonly_txn) {//readonly
 			MDB_reader_entry *r = (env->me_flags & MDB_NOTLS) ? txn->mt_u.reader : pthread_getspecific(env->me_txkey);
 			if (r) {
 				if (r->mr_pid != env->me_pid || r->mr_txnid != (txnid_t)-1)
@@ -2828,7 +2727,7 @@ static int mdb_txn_renew0(MDB_txn *txn)
 					if (reader_table->mti_readers[i].mr_pid == 0)
 						break;
 				if (i == env->me_maxreaders) {
-					UNLOCK_MUTEX(rmutex);
+					pthread_mutex_unlock(rmutex);
 					return MDB_READERS_FULL;
 				}
 				r = &reader_table->mti_readers[i];
@@ -2866,19 +2765,13 @@ static int mdb_txn_renew0(MDB_txn *txn)
 			}
 			txn->m_txnid = r->mr_txnid;
 			txn->mt_u.reader = r;
-		}
 
 	} else {
 		/* Not yet touching txn == env->me_txn0, it may be active */
-		if (reader_table) {
 			if (LOCK_MUTEX(rc, env, env->me_wmutex))
 				return rc;
 			txn->m_txnid = reader_table->mti_txnid;
 			meta = env->me_metas[txn->m_txnid & 1];
-		} else {
-			meta = mdb_env_pick_meta(env);
-			txn->m_txnid = meta->mm_txnid;
-		}
 		txn->m_txnid++;
 #if MDB_DEBUG
 		if (txn->m_txnid == mdb_debug_start)
@@ -9876,29 +9769,26 @@ mdb_env_get_maxkeysize(MDB_env *env)
 int ESECT mdb_reader_list(MDB_env *env, MDB_msg_func *func, void *ctx)
 {
 	unsigned int i, rdrs;
-	MDB_reader_entry *mr;
+;
 	char buf[64];
 	int rc = 0, first = 1;
 
 	if (!env || !func)
 		return -1;
-	if (!env->m_reader_table) {
-		return func("(no reader locks)\n", ctx);
-	}
+
 	rdrs = env->m_reader_table->mti_numreaders;
-	mr = env->m_reader_table->mti_readers;
+	MDB_reader_entry * const mr = env->m_reader_table->mti_readers;
 	for (i=0; i<rdrs; i++) {
 		if (mr[i].mr_pid) {
-			txnid_t	txnid = mr[i].mr_txnid;
-			sprintf(buf, txnid == (txnid_t)-1 ?
-				"%10d %"Z"x -\n" : "%10d %"Z"x %"Yu"\n",
-				(int)mr[i].mr_pid, (size_t)mr[i].mr_tid, txnid);
+
 			if (first) {
 				first = 0;
 				rc = func("    pid     thread     txnid\n", ctx);
 				if (rc < 0)
 					break;
 			}
+			const txnid_t	txnid = mr[i].mr_txnid;
+			sprintf(buf,  "%10d tid:%zu txid: %zu\n", (int)mr[i].mr_pid, (size_t)mr[i].mr_tid, txnid);
 			rc = func(buf, ctx);
 			if (rc < 0)
 				break;
@@ -9992,13 +9882,12 @@ static int ESECT MDB_reader_entry_check0(MDB_env *env, int rlocked, int *dead)
 					}
 					for (; j<rdrs; j++)
 							if (mr[j].mr_pid == pid) {
-								DPRINTF(("clear stale reader pid %u txn %"Yd,
-									(unsigned) pid, mr[j].mr_txnid));
+								DPRINTF(("clear stale reader pid %u txn %lu",(unsigned) pid, mr[j].mr_txnid));
 								mr[j].mr_pid = 0;
 								count++;
 							}
 					if (rmutex)
-						UNLOCK_MUTEX(rmutex);
+						pthread_mutex_unlock(rmutex);
 				}
 			}
 		}
@@ -10020,9 +9909,9 @@ static int ESECT MDB_reader_entry_check0(MDB_env *env, int rlocked, int *dead)
 static int ESECT mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc)
 {
 	int rlocked, rc2;
-	MDB_meta *meta;
+	
 
-	if (rc == MDB_OWNERDEAD) {
+	if (rc == EOWNERDEAD) {
 		/* We own the mutex. Clean up after dead previous owner. */
 		rc = MDB_SUCCESS;
 		rlocked = (mutex == env->me_rmutex);
@@ -10030,7 +9919,7 @@ static int ESECT mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc)
 			/* Keep mti_txnid updated, otherwise next writer can
 			 * overwrite data which latest meta page refers to.
 			 */
-			meta = mdb_env_pick_meta(env);
+			MDB_meta * const meta = mdb_env_pick_meta(env);
 			env->m_reader_table->mti_txnid = meta->mm_txnid;
 			/* env is hosed if the dead thread was ours */
 			if (env->me_txn) {
@@ -10039,14 +9928,13 @@ static int ESECT mdb_mutex_failed(MDB_env *env, mdb_mutexref_t mutex, int rc)
 				rc = MDB_PANIC;
 			}
 		}
-		DPRINTF(("%cmutex owner died, %s", (rlocked ? 'r' : 'w'),
-			(rc ? "this process' env is hosed" : "recovering")));
+		DPRINTF(("%cmutex owner died, %s", (rlocked ? 'r' : 'w'), (rc ? "this process' env is hosed" : "recovering")));
 		rc2 = MDB_reader_entry_check0(env, rlocked, NULL);
 		if (rc2 == 0)
-			rc2 = mdb_mutex_consistent(mutex);
+			rc2 = pthread_mutex_consistent(mutex);
 		if (rc || (rc = rc2)) {
 			DPRINTF(("LOCK_MUTEX recovery failed, %s", mdb_strerror(rc)));
-			UNLOCK_MUTEX(mutex);
+			pthread_mutex_lock(mutex);
 		}
 	} else {
 
