@@ -176,7 +176,7 @@ extern "C" {
 
 /** Unix permissions for creating files, or dummy definition for Windows */
 #ifdef _MSC_VER
-typedef	int	mdb_mode_t;
+typedef	int		mdb_mode_t;
 #else
 typedef	mode_t	mdb_mode_t;
 #endif
@@ -412,6 +412,7 @@ typedef enum MDB_cursor_op {
 	MDB_PREV_DUP,			/**< Position at previous data item of current key.
 								Only for #MDB_DUPSORT */
 	MDB_PREV_NODUP,			/**< Position at last data item of previous key */
+	
 	MDB_SET,/*15*/				/**< Position at specified key */
 	MDB_SET_KEY,			/**< Position at specified key, return key + data */
 	MDB_SET_RANGE,			/**< Position at first key greater than or equal to specified key. */
@@ -493,7 +494,7 @@ typedef struct MDB_stat {
 
 /** @brief Information about the environment */
 typedef struct MDB_envinfo {
-	void	*me_mapaddr;			/**< Address of map, if fixed */
+	void	*	me_mapaddr;			/**< Address of map, if fixed */
 	mdb_size_t	me_mapsize;				/**< Size of the data memory map */
 	mdb_size_t	me_last_pgno;			/**< ID of the last used page */
 	mdb_size_t	me_last_txnid;			/**< ID of the last committed transaction */

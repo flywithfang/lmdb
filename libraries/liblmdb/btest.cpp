@@ -59,6 +59,17 @@ void dump_stat(MDB_env* env) {
     std::cout << "Leaf pages: " << stat.ms_leaf_pages << std::endl;
     std::cout << "Overflow pages: " << stat.ms_overflow_pages << std::endl;
     std::cout << "Entries: " << stat.ms_entries << std::endl;
+    MDB_envinfo mei;
+    mdb_env_info(env,&mei);
+
+    printf("Environment Info\n");
+    printf("  Map address: %p\n", mei.me_mapaddr);
+    printf("  Map size: %zu\n", mei.me_mapsize);
+    printf("  Max pages: %zu\n", mei.me_mapsize / stat.ms_psize);
+    printf("  Number of pages used: %zu\n", mei.me_last_pgno+1);
+    printf("  Last transaction ID: %zu\n", mei.me_last_txnid);
+    printf("  Max readers: %u\n", mei.me_maxreaders);
+    printf("  Number of readers used: %u\n", mei.me_numreaders);
 }
 
 void handle_error(int rc, const char* msg) {
@@ -377,8 +388,14 @@ int main(int argc, char** argv) {
     else if (strcmp(argv[0], "print_free") == 0) {
       
        mdb_dump_free_page_table(env);
-    } 
-    else {
+    }else if(strcmp(argv[0], "reader_table") == 0) {
+        printf("Reader Table Status\n");
+        rc = mdb_reader_list(env, (MDB_msg_func *)fputs, stdout);
+        int dead;
+        mdb_reader_check(env, &dead);
+        printf("  %d stale readers cleared.\n", dead);
+        rc = mdb_reader_list(env, (MDB_msg_func *)fputs, stdout);
+    }else {
         std::cerr << argv[0] << ": invalid command" << std::endl;
     }
 
