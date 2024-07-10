@@ -1317,9 +1317,7 @@ struct MDB_env {
 	HANDLE		me_fd;		/**< The main data file */
 	HANDLE		me_lfd;		/**< The lock file */
 	HANDLE		me_mfd;		/**< For writing and syncing the meta pages */
-#ifdef _WIN32
-	HANDLE		me_ovfd;	/**< Overlapped/async with write-through file handle */
-#endif /* _WIN32 */
+
 
 	uint32_t 	me_flags;		/**< @ref mdb_env */
 	unsigned int	me_psize;	/**< DB page size, inited from me_os_psize */
@@ -1334,7 +1332,7 @@ struct MDB_env {
 	char		*m_shmem_data_file;		/**< the memory map of the data file */
 	MDB_reader_LockTableHeader	*m_reader_table;		/**< the memory map of the lock file or NULL */
 	MDB_meta	*me_metas[NUM_METAS];	/**< pointers to the two meta pages */
-	void		*me_pbuf;		/**< scratch area for DUPSORT put() */
+	void		*	me_pbuf;		/**< scratch area for DUPSORT put() */
 	MDB_txn		*me_txn;		/**< current write transaction */
 	MDB_txn		*me_txn0;		/**< prealloc'd write transaction */
 	mdb_size_t	m_map_size;		/**< size of the data memory map */
@@ -2180,19 +2178,17 @@ static txnid_t mdb_find_oldest_txn_id(MDB_txn *txn)
 {
 	DKBUF;
 
-	int i;
+	
 	txnid_t  oldest = txn->m_txnid - 1;
-	if (txn->mt_env->m_reader_table) {
 		MDB_reader_entry *r = txn->mt_env->m_reader_table->mti_readers;
-		for (i = txn->mt_env->m_reader_table->mti_numreaders; --i >= 0; ) {
+		for (int i = txn->mt_env->m_reader_table->mti_numreaders; --i >= 0; ) {
 			if (r[i].mr_pid) {
 				txnid_t mr = r[i].mr_txnid;
 				if (oldest > mr)
 					oldest = mr;
 			}
 		}
-	}
-		DPRINTF(("cur txn:%lu, oldest txn id:%lu",txn->m_txnid,oldest));
+		DPRINTF(("cur txn:%lu, oldest txn id:%lu, readers_count:%u",txn->m_txnid,oldest,txn->mt_env->m_reader_table->mti_numreaders));
 	return oldest;
 }
 
@@ -2702,7 +2698,7 @@ static int mdb_txn_renew0(MDB_txn *txn)
 	unsigned int i, nr, flags = txn->txn_flags;
 	uint16_t x;
 	int rc, new_notls = 0;
-	const bool readonly_txn= (flags &= MDB_TXN_RDONLY != 0);
+	const bool readonly_txn= (flags &= MDB_TXN_RDONLY) != 0;
 	if (readonly_txn) {//readonly
 			MDB_reader_entry *r = (env->me_flags & MDB_NOTLS) ? txn->mt_u.reader : pthread_getspecific(env->me_txkey);
 			if (r) {
@@ -5098,7 +5094,7 @@ static int __mdb_locate_cursor(MDB_cursor *mc, MDB_val *key, int flags)
 		MDB_node	*node;
 		indx_t		i;
 
-		DPRINTF(("branch page %"Yu" has %u keys", mp->mp_pgno, NUMKEYS(mp)));
+//		DPRINTF(("branch page %"Yu" has %u keys", mp->mp_pgno, NUMKEYS(mp)));
 		/* Don't assert on branch pages in the FreeDB. We can get here
 		 * while in the process of rebalancing a FreeDB branch page; we must
 		 * let that proceed. ITS#8336
@@ -8681,8 +8677,6 @@ done:
 
 int mdb_put(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data, unsigned int flags)
 {
-
-	
 	int rc;
 	DKBUF;
 	DDBUF;
@@ -9371,7 +9365,7 @@ int ESECT mdb_env_info(MDB_env *env, MDB_envinfo *arg)
 		return EINVAL;
 
 	meta = mdb_env_pick_meta(env);
-	arg->me_mapaddr = meta->mm_address;
+	arg->me_mapaddr = env->m_shmem_data_file;
 	arg->me_last_pgno = meta->mm_last_pg;
 	arg->me_last_txnid = meta->mm_txnid;
 
