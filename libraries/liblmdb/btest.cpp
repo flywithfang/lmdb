@@ -394,7 +394,8 @@ int main(int argc, char** argv) {
         int dead;
         mdb_reader_check(env, &dead);
         printf("  %d stale readers cleared.\n", dead);
-        rc = mdb_reader_list(env, (MDB_msg_func *)fputs, stdout);
+        if(dead)
+            mdb_reader_list(env, (MDB_msg_func *)fputs, stdout);
     }else {
         std::cerr << argv[0] << ": invalid command" << std::endl;
     }
