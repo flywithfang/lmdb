@@ -20,7 +20,7 @@ void print_free_db_item(const MDB_val*key, const MDB_val*val){
     MDB_IDL idl = (MDB_IDL)val->mv_data;
     assert(val->mv_size>=sizeof(MDB_ID));
     assert(val->mv_size % sizeof(MDB_ID) == 0);
-    printf("txn id=%lu,page no list:",txn_id);
+    printf("txn id=%lu,free pages:",txn_id);
     const MDB_ID n=idl[0];
     for(MDB_ID k=0;k<n;++k){
         printf("%lu",idl[k+1]);
