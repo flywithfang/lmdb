@@ -390,7 +390,7 @@ static inline int lock_mutex(MDB_env *env, pthread_mutex_t *mutex){
 typedef MDB_ID	pgno_t;
 
 	/** A transaction ID.
-	 *	See struct MDB_txn.m_txnid for details.
+	 *	See struct MDB_txn.m_snapshot_id for details.
 	 */
 typedef MDB_ID	txnid_t;
 
@@ -1168,7 +1168,7 @@ struct MDB_txn {
 	 *	Only committed write transactions increment the ID. If a transaction
 	 *	aborts, the ID may be re-used by the next writer.
 	 */
-	txnid_t		m_txnid;
+	txnid_t		m_snapshot_id;
 	MDB_env		*mt_env;		/**< the DB environment */
 	/** The list of pages that became unused during this transaction.
 	 */
@@ -1315,7 +1315,7 @@ typedef struct MDB_xcursor {
 	/** State of FreeDB old pages, stored in the MDB_env */
 typedef struct MDB_pgstate {
 	pgno_t		*mf_pghead;	/**< Reclaimed freeDB pages, or NULL before use */
-	txnid_t		last_txn_id;	/**< ID of last used record, or 0 if !mf_pghead */
+	txnid_t		last_snapshot_id;	/**< ID of last used record, or 0 if !mf_pghead */
 } MDB_pgstate;
 
 	/** Failed to update the meta page. Probably an I/O error. */
@@ -1357,7 +1357,7 @@ struct MDB_env {
 	uint16_t	*me_dbflags;	/**< array of flags from MDB_db.md_flags */
 	unsigned int	*m_dbiseqs;	/**< array of dbi sequence numbers */
 	pthread_key_t	me_txkey;	/**< thread-key for readers */
-	txnid_t		oldest_txn_id;	/**< ID of oldest reader last time we looked */
+	txnid_t		alive_snapshot_id;	/**< ID of oldest reader last time we looked */
 	MDB_pgstate	old_pg_state;		/**< state of old pages from freeDB */
 
 
@@ -1586,8 +1586,7 @@ mdb_strerror(int err)
 # define mdb_assert0(env, expr, expr_txt) ((expr) ? (void)0 : \
 		mdb_assert_fail(env, expr_txt, mdb_func_, __FILE__, __LINE__))
 
-static void ESECT
-mdb_assert_fail(MDB_env *env, const char *expr_txt,
+static void ESECT mdb_assert_fail(MDB_env *env, const char *expr_txt,
 	const char *func, const char *file, int line)
 {
 	char buf[400];
@@ -1805,7 +1804,7 @@ static void mdb_audit(MDB_txn *txn)
 	}
 	if (freecount + count + NUM_METAS != txn->mt_next_pgno) {
 		fprintf(stderr, "audit: %"Yu" freecount: %"Yu" count: %"Yu" total: %"Yu" next_pgno: %"Yu"\n",
-			txn->m_txnid, freecount, count+NUM_METAS,
+			txn->m_snapshot_id, freecount, count+NUM_METAS,
 			freecount+count+NUM_METAS, txn->mt_next_pgno);
 	}
 }
@@ -1863,7 +1862,7 @@ int mdb_dcmp(MDB_txn *txn, MDB_dbi dbi, const MDB_val *a, const MDB_val *b)
 static MDB_page * mdb_page_malloc(MDB_txn *txn, unsigned num)
 {
 	DKBUF;
-	DPRINTF(("txn:%lu malloc %u pages",txn->m_txnid, num));
+	DPRINTF(("txn:%lu malloc %u pages",txn->m_snapshot_id, num));
 
 	MDB_env *env = txn->mt_env;
 
@@ -2188,12 +2187,12 @@ done:
 	return rc;
 }
 
-/** Find oldest txnid still referenced. Expects txn->m_txnid > 0. */
-static txnid_t mdb_find_oldest_txn_id(MDB_txn *txn)
+/** Find oldest txnid still referenced. Expects txn->m_snapshot_id > 0. */
+static txnid_t mdb_find_alive_snapshot_id(MDB_txn *txn)
 {
 	DKBUF;
 	
-	txnid_t  oldest = txn->m_txnid - 1;
+	txnid_t  oldest = txn->m_snapshot_id - 1;
 		MDB_reader_entry *r = txn->mt_env->m_reader_table->mti_readers;
 		for (int i = txn->mt_env->m_reader_table->mti_numreaders; --i >= 0; ) {
 			if (r[i].mr_pid) {
@@ -2202,7 +2201,7 @@ static txnid_t mdb_find_oldest_txn_id(MDB_txn *txn)
 					oldest = mr;
 			}
 		}
-		DPRINTF(("cur txn:%lu, oldest txn id:%lu, readers_count:%u",txn->m_txnid,oldest,txn->mt_env->m_reader_table->mti_numreaders));
+		DPRINTF(("cur txn:%lu, oldest txn id:%lu, readers_count:%u",txn->m_snapshot_id,oldest,txn->mt_env->m_reader_table->mti_numreaders));
 	return oldest;
 }
 
@@ -2219,14 +2218,14 @@ static void mdb_page_dirty(MDB_txn *txn, MDB_page *mp)
 	txn->mt_dirty_room--;
 }
 
-/** Allocate page numbers and memory for writing.  Maintain old_pg_state.last_txn_id,
+/** Allocate page numbers and memory for writing.  Maintain old_pg_state.last_snapshot_id,
  * old_pg_state.mf_pghead and mt_next_pgno.  Set #MDB_TXN_ERROR on failure.
  *
  * If there are free pages available from older transactions, they
  * are re-used first. Otherwise allocate a new page at mt_next_pgno.
  * Do not modify the freedB, just merge freeDB records into old_pg_state.mf_pghead[]
- * and move old_pg_state.last_txn_id to say which records were consumed.  Only this
- * function can create old_pg_state.mf_pghead and move old_pg_state.last_txn_id/mt_next_pgno.
+ * and move old_pg_state.last_snapshot_id to say which records were consumed.  Only this
+ * function can create old_pg_state.mf_pghead and move old_pg_state.last_snapshot_id/mt_next_pgno.
  * When #MDB_DEVEL & 2, it is not affected by #mdb_freelist_save(): it
  * then uses the transaction's original snapshot of the freeDB.
  * @param[in] mc cursor A cursor handle identifying the transaction and
@@ -2246,12 +2245,10 @@ static int mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 	 * records if old_pg_state.mf_pghead is empty. Then the freelist cannot play
 	 * catch-up with itself by growing while trying to save it.
 	 */
-	enum { Paranoid = 1, Max_retries = 500 };
-#else
-	enum { Paranoid = 0, Max_retries = INT_MAX /*infinite*/ };
 #endif
 	int rc, retry = num * 60;
 	MDB_txn *txn = mc->mc_txn;
+	assert( (txn->txn_flags & MDB_TXN_RDONLY) ==0);
 	MDB_env *env = txn->mt_env;
 	pgno_t pgno;
 	pgno_t *mop = env->old_pg_state.mf_pghead;
@@ -2279,7 +2276,7 @@ static int mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 
 	MDB_cursor m2;
 	int found_old = 0;
-	txnid_t oldest_txn_id = 0, last_txn_id;
+	txnid_t alive_snapshot_id = 0, last_snapshot_id;
 
 	for (MDB_cursor_op op = MDB_FIRST;; op = MDB_NEXT) {
 		MDB_val key, data;
@@ -2301,30 +2298,28 @@ static int mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 
 		if (op == MDB_FIRST) {	/* 1st iteration */
 			/* Prepare to fetch more and coalesce */
-			last_txn_id = env->old_pg_state.last_txn_id;
-			oldest_txn_id = env->oldest_txn_id;
+			last_snapshot_id = env->old_pg_state.last_snapshot_id;
+			alive_snapshot_id = env->alive_snapshot_id;
 			mdb_cursor_init(&m2, txn, FREE_DBI, NULL);
 
-			if (last_txn_id) {
+			if (last_snapshot_id) {
 				op = MDB_SET_RANGE;
-				key.mv_data = &last_txn_id; /* will look up last+1 */
-				key.mv_size = sizeof(last_txn_id);
+				key.mv_data = &last_snapshot_id; /* will look up last+1 */
+				key.mv_size = sizeof(last_snapshot_id);
 			}
-			if (Paranoid && mc->mc_dbi == FREE_DBI)
-				retry = -1;
-		}
-		if (Paranoid && retry < 0 && mop_len)
-			break;
 
-		last_txn_id++;
+		}
+
+
+		last_snapshot_id++;
 		/* Do not fetch more if the record will be too recent */
-		if (oldest_txn_id <= last_txn_id) {
+		if (alive_snapshot_id <= last_snapshot_id) {
 			if (!found_old) {
-				oldest_txn_id = mdb_find_oldest_txn_id(txn);
-				env->oldest_txn_id = oldest_txn_id;
+				alive_snapshot_id = mdb_find_alive_snapshot_id(txn);
+				env->alive_snapshot_id = alive_snapshot_id;
 				found_old = 1;
 			}
-			if (oldest_txn_id <= last_txn_id)
+			if (alive_snapshot_id <= last_snapshot_id)
 				break;
 		}
 		rc = mdb_cursor_get(&m2, &key, NULL, op);
@@ -2333,15 +2328,15 @@ static int mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 				break;
 			goto fail;
 		}
-		last_txn_id = *(txnid_t*)key.mv_data;
-		DPRINTF(("oldest_txn_id=%lu,find last_txn_id=%lu",oldest_txn_id,last_txn_id));
-		if (oldest_txn_id <= last_txn_id) {
+		last_snapshot_id = *(txnid_t*)key.mv_data;
+		DPRINTF(("alive_snapshot_id=%lu,find last_snapshot_id=%lu",alive_snapshot_id,last_snapshot_id));
+		if (alive_snapshot_id <= last_snapshot_id) {
 			if (!found_old) {
-				oldest_txn_id = mdb_find_oldest_txn_id(txn);
-				env->oldest_txn_id = oldest_txn_id;
+				alive_snapshot_id = mdb_find_alive_snapshot_id(txn);
+				env->alive_snapshot_id = alive_snapshot_id;
 				found_old = 1;
 			}
-			if (oldest_txn_id <= last_txn_id)
+			if (alive_snapshot_id <= last_snapshot_id)
 				break;
 		}
 		np = m2.mc_pg[m2.mc_top];
@@ -2362,9 +2357,9 @@ static int mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 				goto fail;
 			mop = env->old_pg_state.mf_pghead;
 		}
-		env->old_pg_state.last_txn_id = last_txn_id;
+		env->old_pg_state.last_snapshot_id = last_snapshot_id;
 #if (MDB_DEBUG) > 1
-		DPRINTF(("IDL read txn %"Yu" root %"Yu" num %u", last_txn_id, txn->mt_dbs[FREE_DBI].md_root, i));
+		DPRINTF(("IDL read txn %"Yu" root %"Yu" num %u", last_snapshot_id, txn->mt_dbs[FREE_DBI].md_root, i));
 		//for (j = i; j; j--)
 		//	DPRINTF(("IDL %"Yu, idl[j]));
 #endif
@@ -2802,7 +2797,7 @@ static int __mdb_txn_init(MDB_txn *txn)
 			} else {
 				meta = env->me_metas[r->mr_txnid & 1];
 			}
-			txn->m_txnid = r->mr_txnid;
+			txn->m_snapshot_id = r->mr_txnid;
 			txn->mt_u.reader = r;
 
 	} else {
@@ -2810,11 +2805,12 @@ static int __mdb_txn_init(MDB_txn *txn)
 		rc = lock_mutex(env,env->me_wmutex);
 			if (rc!=MDB_SUCCESS)
 				return rc;
-			txn->m_txnid = reader_table->mti_txnid;
-			meta = env->me_metas[txn->m_txnid & 1];
-		txn->m_txnid++;
+		//	txn->m_snapshot_id = reader_table->mti_txnid;
+			meta = mdb_env_pick_meta(env);
+			assert(meta->mm_txnid==reader_table->mti_txnid);
+			txn->m_snapshot_id = meta->mm_txnid+1;
 #if MDB_DEBUG
-		if (txn->m_txnid == mdb_debug_start)
+		if (txn->m_snapshot_id == mdb_debug_start)
 			mdb_debug = MDB_DBG_INFO;
 #endif
 		txn->mt_child = NULL;
@@ -2871,7 +2867,7 @@ int mdb_txn_renew(MDB_txn *txn)
 	rc = __mdb_txn_init(txn);
 	if (rc == MDB_SUCCESS) {
 		DPRINTF(("renew txn %zu %c %p on mdbenv %p, root page %zu",
-			txn->m_txnid, (txn->txn_flags & MDB_TXN_RDONLY) ? 'r' : 'w',
+			txn->m_snapshot_id, (txn->txn_flags & MDB_TXN_RDONLY) ? 'r' : 'w',
 			(void *)txn, (void *)txn->mt_env, txn->mt_dbs[MAIN_DBI].md_root));
 	}
 	return rc;
@@ -2909,7 +2905,7 @@ int mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **r
 		/* Reuse preallocated write txn. However, do not touch it until
 		 * __mdb_txn_init() succeeds, since it currently may be active.
 		 */
-		DPRINTF(("use preallocated txn %lu", env->me_txn0->m_txnid));
+		DPRINTF(("use preallocated txn %lu", env->me_txn0->m_snapshot_id));
 		txn = env->me_txn0;
 		
 	}
@@ -2923,7 +2919,7 @@ int mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **r
 		txn->txn_flags |= flags;	/* could not change txn=me_txn0 earlier */
 		*ret = txn;
 		DPRINTF(("begin txn %zu %c %p on mdbenv %p, main root page %zu",
-			txn->m_txnid, (flags & MDB_RDONLY) ? 'r' : 'w',
+			txn->m_snapshot_id, (flags & MDB_RDONLY) ? 'r' : 'w',
 			(void *) txn, (void *) env, txn->mt_dbs[MAIN_DBI].md_root));
 	}
 	MDB_TRACE(("%p, %p, %u = %p", env, parent, flags, txn));
@@ -2942,7 +2938,7 @@ mdb_size_t
 mdb_txn_id(MDB_txn *txn)
 {
     if(!txn) return 0;
-    return txn->m_txnid;
+    return txn->m_snapshot_id;
 }
 
 /** Export or close DBI handles opened in this txn. */
@@ -2990,7 +2986,7 @@ static void mdb_txn_end(MDB_txn *txn, unsigned mode)
 
 	DPRINTF(("%s txn %"Yu" %c %p on mdbenv %p, root page %"Yu,
 		names[mode & MDB_END_OPMASK],
-		txn->m_txnid, (txn->txn_flags & MDB_TXN_RDONLY) ? 'r' : 'w',
+		txn->m_snapshot_id, (txn->txn_flags & MDB_TXN_RDONLY) ? 'r' : 'w',
 		(void *) txn, (void *)env, txn->mt_dbs[MAIN_DBI].md_root));
 
 	if (F_ISSET(txn->txn_flags, MDB_TXN_RDONLY)) {
@@ -3023,7 +3019,7 @@ static void mdb_txn_end(MDB_txn *txn, unsigned mode)
 		env->m_free_pgs = txn->m_free_pgs;
 		/* old_pg_state: */
 		env->old_pg_state.mf_pghead = NULL;
-		env->old_pg_state.last_txn_id = 0;
+		env->old_pg_state.last_snapshot_id = 0;
 
 		env->me_txn = NULL;
 		mode = 0;	/* txn == env->me_txn0, do not free() it */
@@ -3040,8 +3036,7 @@ static void mdb_txn_end(MDB_txn *txn, unsigned mode)
 		free(txn);
 }
 
-void
-mdb_txn_reset(MDB_txn *txn)
+void mdb_txn_reset(MDB_txn *txn)
 {
 	if (txn == NULL)
 		return;
@@ -3080,14 +3075,14 @@ void mdb_txn_abort(MDB_txn *txn)
 static int mdb_freelist_save(MDB_txn *txn)
 {
 	/* env->old_pg_state.mf_pghead[] can grow and shrink during this call.
-	 * env->old_pg_state.last_txn_id and txn->m_free_pgs[] can only grow.
+	 * env->old_pg_state.last_snapshot_id and txn->m_free_pgs[] can only grow.
 	 * Page numbers cannot disappear from txn->m_free_pgs[].
 	 */
 	MDB_cursor mc;
 	MDB_env	*env = txn->mt_env;
 	int rc, maxfree_1pg = env->me_maxfree_1pg, more = 1;
 	txnid_t	pglast = 0, head_id = 0;
-	pgno_t	freecnt = 0, *free_pgs, *mop;
+	pgno_t	  *mop;
 	ssize_t	head_room = 0, total_room = 0, mop_len, clean_limit;
 
 	mdb_cursor_init(&mc, txn, FREE_DBI, NULL);
@@ -3156,18 +3151,18 @@ static int mdb_freelist_save(MDB_txn *txn)
 		/* If using records from freeDB which we have not yet
 		 * deleted, delete them and any we reserved for old_pg_state.mf_pghead.
 		 */
-		while (pglast < env->old_pg_state.last_txn_id) {
+		while (pglast < env->old_pg_state.last_snapshot_id) {
 			rc = mdb_cursor_first(&mc, &key, NULL);
 			if (rc)
 				return rc;
 			pglast = head_id = *(txnid_t *)key.mv_data;
 			total_room = head_room = 0;
-			mdb_tassert(txn, pglast <= env->old_pg_state.last_txn_id);
+			mdb_tassert(txn, pglast <= env->old_pg_state.last_snapshot_id);
 			rc = _mdb_cursor_del(&mc, 0);
 			if (rc)
 				return rc;
 		}
-
+		int freecnt = 0;
 		/* Save the IDL of pages freed by this txn, to a single record */
 		if (freecnt < txn->m_free_pgs[0]) {
 			if (!freecnt) {
@@ -3176,10 +3171,9 @@ static int mdb_freelist_save(MDB_txn *txn)
 				if (rc && rc != MDB_NOTFOUND)
 					return rc;
 			}
-			free_pgs = txn->m_free_pgs;
+			pgno_t* free_pgs = txn->m_free_pgs;
 			/* Write to last page of freeDB */
-			key.mv_size = sizeof(txn->m_txnid);
-			key.mv_data = &txn->m_txnid;
+			key.mv_size = sizeof(txn->m_snapshot_id); key.mv_data = &txn->m_snapshot_id;
 			do {
 				freecnt = free_pgs[0];
 				data.mv_size = MDB_IDL_SIZEOF(free_pgs);
@@ -3195,7 +3189,7 @@ static int mdb_freelist_save(MDB_txn *txn)
 			{
 				unsigned int i = free_pgs[0];
 				DPRINTF(("IDL write txn %"Yu" root %"Yu" num %u",
-					txn->m_txnid, txn->mt_dbs[FREE_DBI].md_root, i));
+					txn->m_snapshot_id, txn->mt_dbs[FREE_DBI].md_root, i));
 				for (; i; i--)
 					DPRINTF(("IDL %"Yu, free_pgs[i]));
 			}
@@ -3208,7 +3202,7 @@ static int mdb_freelist_save(MDB_txn *txn)
 
 		/* Reserve records for old_pg_state.mf_pghead[]. Split it if multi-page,
 		 * to avoid searching freeDB for a page range. Use keys in
-		 * range [1,old_pg_state.last_txn_id]: Smaller than txnid of oldest reader.
+		 * range [1,old_pg_state.last_snapshot_id]: Smaller than txnid of oldest reader.
 		 */
 		if (total_room >= mop_len) {
 			if (total_room == mop_len || --more < 0)
@@ -3278,7 +3272,7 @@ static int mdb_freelist_save(MDB_txn *txn)
 			ssize_t	len = (ssize_t)(data.mv_size / sizeof(MDB_ID)) - 1;
 			MDB_ID save;
 
-			mdb_tassert(txn, len >= 0 && id <= env->old_pg_state.last_txn_id);
+			mdb_tassert(txn, len >= 0 && id <= env->old_pg_state.last_snapshot_id);
 			key.mv_data = &id;
 			if (len > mop_len) {
 				len = mop_len;
@@ -3457,7 +3451,7 @@ static int _mdb_txn_commit(MDB_txn *txn)
 		!(txn->txn_flags & (MDB_TXN_DIRTY|MDB_TXN_SPILLS)))
 		goto done;
 
-	DPRINTF(("committing txn %"Yu" %p on mdbenv %p, main root page %"Yu,txn->m_txnid, (void*)txn, (void*)env, txn->mt_dbs[MAIN_DBI].md_root));
+	DPRINTF(("committing txn %"Yu" %p on mdbenv %p, main root page %"Yu,txn->m_snapshot_id, (void*)txn, (void*)env, txn->mt_dbs[MAIN_DBI].md_root));
 
 	/* Update DB root pointers */
 	if (txn->mt_numdbs > CORE_DBS) {
@@ -3665,7 +3659,7 @@ static int mdb_env_write_meta(MDB_txn *txn)
 	assert( (txn->txn_flags & MDB_TXN_RDONLY) ==0 );
 
 	int r2;
-	const int toggle = txn->m_txnid & 1;
+	const int toggle = txn->m_snapshot_id & 1;
 
 
 	MDB_env * const env = txn->mt_env;
@@ -3683,7 +3677,7 @@ static int mdb_env_write_meta(MDB_txn *txn)
 	meta.mm_dbs[FREE_DBI] = txn->mt_dbs[FREE_DBI];
 	meta.mm_dbs[MAIN_DBI] = txn->mt_dbs[MAIN_DBI];
 	meta.mm_last_pg = txn->mt_next_pgno - 1;
-	meta.mm_txnid = txn->m_txnid;
+	meta.mm_txnid = txn->m_snapshot_id;
 
 	MDB_OFF_T const off =  (char *)mp - env->m_shmem_data_file + offsetof(MDB_meta, mm_mapsize);
 	char * const ptr = (char *)&meta +  offsetof(MDB_meta, mm_mapsize);
@@ -3730,8 +3724,8 @@ done:
 //	sleep(5);
 	DPRINTF(("writing meta page %d,root page %zu, meta_tx_id:%zu,%zu",toggle, txn->mt_dbs[MAIN_DBI].md_root, meta.mm_txnid,mp->mm_txnid));
 
-		assert(meta.mm_txnid == txn->m_txnid);
-		assert(mp->mm_txnid == txn->m_txnid);
+		assert(meta.mm_txnid == txn->m_snapshot_id);
+		assert(mp->mm_txnid == txn->m_snapshot_id);
 		env->m_reader_table->mti_txnid = meta.mm_txnid;
 
 	return MDB_SUCCESS;
@@ -3741,7 +3735,7 @@ done:
  * @param[in] env the environment handle
  * @return newest #MDB_meta.
  */
-static MDB_meta * mdb_env_pick_meta(const MDB_env *env)
+static inline MDB_meta * mdb_env_pick_meta(const MDB_env *env)
 {
 	MDB_meta *const *metas = env->me_metas;
 	return metas[ (metas[0]->mm_txnid < metas[1]->mm_txnid) ^ ((env->me_flags & MDB_PREVSNAPSHOT) != 0) ];
@@ -5308,7 +5302,7 @@ mdb_ovpage_free(MDB_cursor *mc, MDB_page *mp)
 	 * so we should give it back to our current free list, if any.
 	 * Otherwise put it onto the list of pages we freed in this txn.
 	 *
-	 * Won't create old_pg_state.mf_pghead: old_pg_state.last_txn_id must be inited along with it.
+	 * Won't create old_pg_state.mf_pghead: old_pg_state.last_snapshot_id must be inited along with it.
 	 * Unsupported in nested txns: They would need to hide the page
 	 * range in ancestor txns' dirty and spilled lists.
 	 */
