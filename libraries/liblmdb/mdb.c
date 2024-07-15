@@ -1624,7 +1624,7 @@ char * mdb_dkey(MDB_val *key, char *buf)
 	for (i=0; i<key->mv_size; i++)
 		ptr += sprintf(ptr, "%02x", *c++);
 #else
-	if(key->mv_size==8&& !isalpha(*(char*)key->mv_data) ){
+	if(key->mv_size==8/*&& !isalpha(*(char*)key->mv_data) */){
 		const uint64_t d=*(uint64_t*)key->mv_data;
 		sprintf(buf, "%lu", d);
 	}
@@ -2193,7 +2193,7 @@ static void mdb_page_dirty(MDB_txn *txn, MDB_page *mp)
 	txn->mt_dirty_room--;
 }
 
-int try_alloc_from_free_page_db(MDB_txn *txn, const int num, pgno_t * new_pg_no){
+int __try_alloc_from_free_page_db(MDB_txn *txn, const int num, 	MDB_page **np){
 	int  retry = num * 60;
 	MDB_env *const env = txn->mt_env;
 	int rc=0;
@@ -2213,7 +2213,26 @@ int try_alloc_from_free_page_db(MDB_txn *txn, const int num, pgno_t * new_pg_no)
 			do {
 				const pgno_t pgno = env->old_pg_state.mf_pghead[i];
 				if (env->old_pg_state.mf_pghead[i-num+1] == pgno+num-1) /*descending*/{
-							*new_pg_no = pgno;
+							
+							MDB_page * mp =  mdb_page_malloc(txn, num);
+								if (!mp) {
+										rc = ENOMEM;
+										return rc;
+								}
+
+									// [ i-num+1,  i]  (i-num, i]
+								/* Move any stragglers down */
+							//	for (unsigned int j = i-num; j < free_page_count; )
+							//		env->old_pg_state.mf_pghead[++j] = env->old_pg_state.mf_pghead[++i];
+								for(unsigned int j=i-num;j<free_page_count-num;){
+									env->old_pg_state.mf_pghead[++j] = env->old_pg_state.mf_pghead[++i];
+								}
+								env->old_pg_state.mf_pghead[0] = free_page_count -num;
+								assert(free_page_count>=num);
+
+								mp->mp_pgno=pgno;
+								DPRINTF(("allocate from free db:pgno %zu,num:%u, rest:%u",pgno,num,free_page_count-num));
+								*np=mp;
 							return MDB_SUCCESS;
 					}
 			} while (--i >=num);
@@ -2320,152 +2339,41 @@ static int mdb_page_alloc(MDB_cursor *mc, const int num, MDB_page **mp)
 		return MDB_SUCCESS;
 	}
 	int rc;
-	//DPRINTF(("table:%u, alloc:%d pages", mc->mc_dbi,num));
 	/* If our dirty list is already full, we can't do anything */
 	if (txn->mt_dirty_room == 0) {
 		rc = MDB_TXN_FULL;
-		goto fail;
+		txn->txn_flags |= MDB_TXN_ERROR;
+		return rc;
 	}
 
-	int  retry = num * 60;
-	MDB_env *const env = txn->mt_env;
-	pgno_t pgno;
-	unsigned  free_page_count = env->old_pg_state.mf_pghead ? env->old_pg_state.mf_pghead[0] : 0;
-	unsigned i;
-	const unsigned n2=num-1;
-	MDB_page *np;
-	*mp = NULL;
-	MDB_cursor m2;
-	int found_old = 0;
-	txnid_t last_snapshot_id;
-
-	for (MDB_cursor_op op = MDB_FIRST;; op = MDB_NEXT) {
-		MDB_val key, data;
-		MDB_node *leaf;
-
-		/* Seek a big enough contiguous page range. Prefer
-		 * pages at the tail, just truncating the list.
-		 */
-		if (free_page_count >= num) {
-			i = free_page_count;
-			do {
-				pgno = env->old_pg_state.mf_pghead[i];
-				if (env->old_pg_state.mf_pghead[i-num+1] == pgno+num-1) //descending
-					goto search_done;
-			} while (--i >=num);
-			if (--retry < 0)
-				break;
-		}
-
-		if (op == MDB_FIRST) {	/* 1st iteration */
-			/* Prepare to fetch more and coalesce */
-			last_snapshot_id = env->old_pg_state.last_snapshot_id;
-			
-			mdb_cursor_init(&m2, txn, FREE_DBI, NULL);
-
-			if (last_snapshot_id) {
-				op = MDB_SET_RANGE;
-				key.mv_data = &last_snapshot_id; /* will look up last+1 */
-				key.mv_size = sizeof(last_snapshot_id);
+	rc =__try_alloc_from_free_page_db(txn,num,mp);
+	if(rc== MDB_SUCCESS){
+		assert((*mp)->mp_pgno);
+		mdb_page_dirty(txn, *mp);
+		return MDB_SUCCESS;
+	}else if(rc==MDB_NOTFOUND){
+		/* Use new pages from the map when nothing suitable in the freeDB */
+			if (txn->mt_next_pgno + num >= txn->mt_env->me_maxpg) {
+				DPUTS("DB size maxed out");
+				rc = MDB_MAP_FULL;
+				txn->txn_flags |= MDB_TXN_ERROR;
+				return rc;
 			}
-
-		}
-
-
-		last_snapshot_id++;
-		/* Do not fetch more if the record will be too recent */
-		if (env->alive_snapshot_id <= last_snapshot_id) {
-			if (!found_old) {
-				env->alive_snapshot_id = mdb_find_alive_snapshot_id(txn);
-				found_old = 1;
-			}
-			if (env->alive_snapshot_id <= last_snapshot_id)
-				break;
-		}
-		rc = mdb_cursor_get(&m2, &key, NULL, op);
-		if (rc) {
-			if (rc == MDB_NOTFOUND)
-				break;
-			goto fail;
-		}
-		last_snapshot_id = *(txnid_t*)key.mv_data;
-//		DPRINTF(("alive_snapshot_id=%lu,find last_snapshot_id=%lu",env->alive_snapshot_id,last_snapshot_id));
-		if (env->alive_snapshot_id <= last_snapshot_id) {
-			if (!found_old) {
-				env->alive_snapshot_id = mdb_find_alive_snapshot_id(txn);
-				found_old = 1;
-			}
-			if (env->alive_snapshot_id <= last_snapshot_id)
-				break;
-		}
-		np = m2.mc_pg[m2.mc_top];
-		leaf = NODEPTR(np, m2.mc_ki[m2.mc_top]);
-		if ((rc = mdb_node_read(&m2, leaf, &data)) != MDB_SUCCESS)
-			goto fail;
-
-		pgno_t *const idl = (MDB_ID *) data.mv_data;
-		assert(data.mv_size==(idl[0]+1)*sizeof(MDB_ID));
-		i = idl[0];
-		if (!env->old_pg_state.mf_pghead) {
-			if (!(env->old_pg_state.mf_pghead =mdb_midl_alloc(i))) {
-				rc = ENOMEM;
-				goto fail;
-			}
-		} else {
-			if ((rc = mdb_midl_expand(&env->old_pg_state.mf_pghead, i)) != 0)
-				goto fail;
-		}
-		env->old_pg_state.last_snapshot_id = last_snapshot_id;
-#if (MDB_DEBUG) > 1
-		DPRINTF(("IDL read last_snapshot_id %zu root %zu num %u", last_snapshot_id, txn->mt_dbs[FREE_DBI].md_root, i));
-		//for (j = i; j; j--)
-		//	DPRINTF(("IDL %"Yu, idl[j]));
-#endif
-		/* Merge in descending sorted order */
-		mdb_midl_xmerge(env->old_pg_state.mf_pghead, idl);
-		free_page_count = env->old_pg_state.mf_pghead[0];
-	}//for
-
-	/* Use new pages from the map when nothing suitable in the freeDB */
-	i = 0;
-	pgno = txn->mt_next_pgno;
-	if (pgno + num >= env->me_maxpg) {
-			DPUTS("DB size maxed out");
-			rc = MDB_MAP_FULL;
-			goto fail;
-	}
-
-search_done:
- 
+		MDB_page *np;
 		if (!(np = mdb_page_malloc(txn, num))) {
 			rc = ENOMEM;
-			goto fail;
+			txn->txn_flags |= MDB_TXN_ERROR;
+			 return rc;
 		}
-               //   i-num
-	if (i) { ///  xxxxx     iyyyyyy   
-		// [ i-num+1,  i]  (i-num, i]
-		
-		/* Move any stragglers down */
-	//	for (unsigned int j = i-num; j < free_page_count; )
-	//		env->old_pg_state.mf_pghead[++j] = env->old_pg_state.mf_pghead[++i];
-		for(unsigned int j=i-num;j<free_page_count-num;){
-			env->old_pg_state.mf_pghead[++j] = env->old_pg_state.mf_pghead[++i];
-		}
-		env->old_pg_state.mf_pghead[0] = free_page_count -num;
-		assert(free_page_count>=num);
-
-	} else {
-		txn->mt_next_pgno = pgno + num;
+		np->mp_pgno = txn->mt_next_pgno;
+		*mp=np;
+		txn->mt_next_pgno +=  num;
+		mdb_page_dirty(txn, np);
+		DPRINTF(("allocate free page %lu",np->mp_pgno));
+		return MDB_SUCCESS;
 	}
-	np->mp_pgno = pgno;
-	mdb_page_dirty(txn, np);
-	*mp = np;
-	//DPRINTF(("found free page %lu",np->mp_pgno));
-	return MDB_SUCCESS;
-
-fail:
-	txn->txn_flags |= MDB_TXN_ERROR;
 	return rc;
+
 }
 
 /** Copy the used portions of a non-overflow page.
@@ -3150,8 +3058,7 @@ static int mdb_freelist_save(MDB_txn *txn)
 	MDB_cursor mc;
 	MDB_env	*env = txn->mt_env;
 	int rc, maxfree_1pg = env->me_maxfree_1pg, more = 1;
-	txnid_t	pglast = 0, head_id = 0;
-	pgno_t	  *mop;
+
 	ssize_t	head_room = 0, total_room = 0, free_page_count, clean_limit;
 
 	DPRINTF(("last_snapshot_id=%zu",env->old_pg_state.last_snapshot_id));
@@ -3209,6 +3116,8 @@ static int mdb_freelist_save(MDB_txn *txn)
 		txn->mt_loose_count = 0;
 	}
 
+	txnid_t	pglast = 0, head_id = 0;
+	pgno_t	  *mop;
 	/* MDB_RESERVE cancels meminit in ovpage malloc (when no WRITEMAP) */
 	clean_limit = (env->me_flags & (MDB_NOMEMINIT)) ? SSIZE_MAX : maxfree_1pg;
 	int freecnt = 0;
@@ -5060,9 +4969,9 @@ static MDB_node * mdb_node_search(MDB_cursor *mc, MDB_val *key, int *exactp)
 	return node;
 }
 
-void print_cursor(MDB_cursor*mc,const char * func_name){
+void print_cursor(MDB_cursor*mc,const char * func_name,int line){
 	#if defined(MDB_DEBUG)
-	printf("%s:\n",func_name);
+	printf("cursor stack %s:%d:\n",func_name,line);
 	for( int k=mc->mc_top;k>=0;--k){
 		printf(" page %lu:%u",mc->mc_pg[k]->mp_pgno,mc->mc_ki[k]);
 		if(k>0)
@@ -5253,7 +5162,7 @@ ready:
 	mc->mc_flags &= ~C_EOF;
 
 //	DPRINTF(("done. key:%s,flags:0x%x",DKEY(key),flags));
-	print_cursor(mc,__FUNCTION__);
+			
 	
 	return MDB_SUCCESS;
 }
@@ -5871,7 +5780,7 @@ set2:
 set1:
 	mc->mc_flags |= C_INITIALIZED;
 	mc->mc_flags &= ~C_EOF;
-	print_cursor(mc,__FUNCTION__);
+	print_cursor(mc,__FUNCTION__,__LINE__);
 	if (IS_LEAF2(mp)) {
 		if (op == MDB_SET_RANGE || op == MDB_SET_KEY) {
 			key->mv_size = mc->mc_db->md_pad;
@@ -5958,7 +5867,7 @@ static int mdb_cursor_first(MDB_cursor *mc, MDB_val *key, MDB_val *data)
 	mc->mc_flags &= ~C_EOF;
 
 	mc->mc_ki[mc->mc_top] = 0;
-	print_cursor(mc,__FUNCTION__);
+	print_cursor(mc,__FUNCTION__,__LINE__);
 
 	if (IS_LEAF2(page)) {
 		DPRINTF(("leaf2! %lu",page->mp_pgno));
@@ -6014,7 +5923,7 @@ static int mdb_cursor_last(MDB_cursor *mc, MDB_val *key, MDB_val *data)
 
 	mc->mc_ki[mc->mc_top] = NUMKEYS(mc->mc_pg[mc->mc_top]) - 1;
 	mc->mc_flags |= C_INITIALIZED|C_EOF;
-	print_cursor(mc,__FUNCTION__);
+	print_cursor(mc,__FUNCTION__,__LINE__);
 
 	leaf = NODEPTR(mc->mc_pg[mc->mc_top], mc->mc_ki[mc->mc_top]);
 
@@ -6043,7 +5952,7 @@ static int mdb_cursor_last(MDB_cursor *mc, MDB_val *key, MDB_val *data)
 int mdb_cursor_get(MDB_cursor *mc, MDB_val *key, MDB_val *data,MDB_cursor_op op)
 {
 	DKBUF;
-	DPRINTF(("table:%u,root:%lu, cursor_op:%s, key:%s",mc->mc_dbi,mc->mc_db->md_root,cursor_op_name[op],op== MDB_SET || op== MDB_SET_KEY ?DKEY(key):"0"));
+//	DPRINTF(("table:%u,root:%lu, cursor_op:%s, key:%s",mc->mc_dbi,mc->mc_db->md_root,cursor_op_name[op],op== MDB_SET || op== MDB_SET_KEY ?DKEY(key):"0"));
 	int		 rc;
 	int		 exact = 0;
 	int		 (*mfunc)(MDB_cursor *mc, MDB_val *key, MDB_val *data);
@@ -6234,7 +6143,7 @@ fetchm:
 static int mdb_cursor_touch(MDB_cursor *mc)
 {
 	DKBUF;
-	print_cursor(mc,__FUNCTION__);
+	print_cursor(mc,__FUNCTION__,__LINE__);
 	int rc = MDB_SUCCESS;
 
 	if (mc->mc_dbi >= CORE_DBS && !(*mc->mc_dbflag & (DB_DIRTY|DB_DUPDATA))) {
@@ -6768,7 +6677,7 @@ put_sub:
 			 * make sure the cursor is marked valid.
 			 */
 			mc->mc_flags |= C_INITIALIZED;
-			print_cursor(mc,__FUNCTION__);
+			print_cursor(mc,__FUNCTION__,__LINE__);
 		}
 		if (flags & MDB_MULTIPLE) {
 			if (!rc) {
