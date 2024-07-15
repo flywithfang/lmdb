@@ -103,18 +103,10 @@ typedef SSIZE_T	ssize_t;
 # define MDB_FDATASYNC		fsync
 #endif
 
-#ifndef _WIN32
 #include <pthread.h>
 #include <signal.h>
 
 #define MDB_USE_POSIX_MUTEX	1
-
-#endif /* !_WIN32 */
-
-#if defined(_WIN32) + defined(MDB_USE_POSIX_SEM) + defined(MDB_USE_SYSV_SEM) \
-	+ defined(MDB_USE_POSIX_MUTEX) != 1
-# error "Ambiguous shared-lock implementation"
-#endif
 
 #ifdef USE_VALGRIND
 #include <valgrind/memcheck.h>
@@ -162,16 +154,6 @@ typedef SSIZE_T	ssize_t;
 
 #include <stdatomic.h>
 #include <ctype.h>
-
-void full_memory_barrier() {
-    atomic_thread_fence(memory_order_seq_cst);
-}
-
-#if (BYTE_ORDER == LITTLE_ENDIAN) == (BYTE_ORDER == BIG_ENDIAN)
-# error "Unknown or unsupported endianness (BYTE_ORDER)"
-#elif (-6 & 5) || CHAR_BIT!=8 || UINT_MAX!=0xffffffff || MDB_SIZE_MAX%UINT_MAX
-# error "Two's complement, reasonably sized integer types, please"
-#endif
 
 #if (((__clang_major__ << 8) | __clang_minor__) >= 0x0302) || (((__GNUC__ << 8) | __GNUC_MINOR__) >= 0x0403)
 /** Mark infrequently used env functions as cold. This puts them in a separate
@@ -4357,95 +4339,22 @@ static int ESECT mdb_env_try_exclusive_lock(MDB_env *env, int *excl)
 
 	return rc;
 }
-
-#ifdef MDB_USE_HASH
-/*
- * hash_64 - 64 bit Fowler/Noll/Vo-0 FNV-1a hash code
- *
- * @(#) $Revision: 5.1 $
- * @(#) $Id: hash_64a.c,v 5.1 2009/06/30 09:01:38 chongo Exp $
- * @(#) $Source: /usr/local/src/cmd/fnv/RCS/hash_64a.c,v $
- *
- *	  http://www.isthe.com/chongo/tech/comp/fnv/index.html
- *
- ***
- *
- * Please do not copyright this code.  This code is in the public domain.
- *
- * LANDON CURT NOLL DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO
- * EVENT SHALL LANDON CURT NOLL BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF
- * USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
- * OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
- * PERFORMANCE OF THIS SOFTWARE.
- *
- * By:
- *	chongo <Landon Curt Noll> /\oo/\
- *	  http://www.isthe.com/chongo/
- *
- * Share and Enjoy!	:-)
- */
-
-/** perform a 64 bit Fowler/Noll/Vo FNV-1a hash on a buffer
- * @param[in] val	value to hash
- * @param[in] len	length of value
- * @return 64 bit hash
- */
-static mdb_hash_t
-mdb_hash(const void *val, size_t len)
-{
-	const unsigned char *s = (const unsigned char *) val, *end = s + len;
-	mdb_hash_t hval = 0xcbf29ce484222325ULL;
-	/*
-	 * FNV-1a hash each octet of the buffer
-	 */
-	while (s < end) {
-		hval = (hval ^ *s++) * 0x100000001b3ULL;
+static void print_data(bool idl, MDB_val *data){
+	#if defined(MDB_DEBUG)
+	if(idl){
+		assert(data->mv_size%8==0);
+		for(int k=0;k<data->mv_size;k+=8){
+			if(k>0)
+				printf(",");
+			printf("%zu", *(MDB_ID*)((char*)data->mv_data+k)  );
+		}
+	}else{
+		printf("%.*s", (int)data->mv_size,(char*)data->mv_data);
 	}
-	/* return our new hash value */
-	return hval;
+	printf("\n");
+	#endif
+
 }
-
-/** Hash the string and output the encoded hash.
- * This uses modified RFC1924 Ascii85 encoding to accommodate systems with
- * very short name limits. We don't care about the encoding being reversible,
- * we just want to preserve as many bits of the input as possible in a
- * small printable string.
- * @param[in] str string to hash
- * @param[out] encbuf an array of 11 chars to hold the hash
- */
-static const char mdb_a85[]= "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
-
-static void ESECT
-mdb_pack85(unsigned long long l, char *out)
-{
-	int i;
-
-	for (i=0; i<10 && l; i++) {
-		*out++ = mdb_a85[l % 85];
-		l /= 85;
-	}
-	*out = '\0';
-}
-
-/** Init #MDB_env.me_mutexname[] except the char which #MUTEXNAME() will set.
- *	Changes to this code must be reflected in #MDB_LOCK_FORMAT.
- */
-static void ESECT
-mdb_env_mname_init(MDB_env *env)
-{
-	char *nm = env->me_mutexname;
-	strcpy(nm, MUTEXNAME_PREFIX);
-	mdb_pack85(env->m_reader_table->mti_mutexid, nm + sizeof(MUTEXNAME_PREFIX));
-}
-
-/** Return env->me_mutexname after filling in ch ('r'/'w') for convenience */
-#define MUTEXNAME(env, ch) ( \
-		(void) ((env)->me_mutexname[sizeof(MUTEXNAME_PREFIX)-1] = (ch)), \
-		(env)->me_mutexname)
-
-#endif
 
 /** Open and/or initialize the lock region for the environment.
  * @param[in] env The LMDB environment.
@@ -6557,8 +6466,12 @@ current:
 			 */
 			if (F_ISSET(flags, MDB_RESERVE))
 				data->mv_data = olddata.mv_data;
-			else if (!(mc->mc_flags & C_SUB))
+			else if (!(mc->mc_flags & C_SUB)){
 				memcpy(olddata.mv_data, data->mv_data, data->mv_size);
+				if(mc->mc_dbi==FREE_DBI && (flags & MDB_RESERVE)==0) {
+					print_data(true,data);
+				}
+			}
 			else {
 				if (key->mv_size != NODEKSZ(leaf))
 					goto new_ksize;
@@ -6906,6 +6819,7 @@ mdb_branch_size(MDB_env *env, MDB_val *key)
 	return sz + sizeof(indx_t);
 }
 
+
 /** Add a node to the page pointed to by the cursor.
  * Set #MDB_TXN_ERROR on failure.
  * @param[in] mc The cursor for this operation.
@@ -6922,8 +6836,7 @@ mdb_branch_size(MDB_env *env, MDB_val *key)
  *	page's free space before calling this function.
  * </ul>
  */
-static int mdb_node_add(MDB_cursor *mc, indx_t indx,
-    MDB_val *key, MDB_val *data, pgno_t pgno, unsigned int flags)
+static int mdb_node_add(MDB_cursor *mc, indx_t indx,MDB_val *key, MDB_val *data, pgno_t pgno, unsigned int flags)
 {
 	unsigned int	 i;
 	size_t		 node_size = NODESIZE;
@@ -6943,6 +6856,9 @@ static int mdb_node_add(MDB_cursor *mc, indx_t indx,
 		mdb_dbg_pgno(mp), indx, data ? data->mv_size : 0,
 		key ? key->mv_size : 0, key ? DKEY(key) : "null"));
 
+	if(mc->mc_dbi==FREE_DBI && (flags & MDB_RESERVE)==0) {
+		print_data(true,data);
+	}
 	if (IS_LEAF2(mp)) {
 		/* Move higher keys up one slot. */
 		int ksize = mc->mc_db->md_pad, dif;
@@ -8081,8 +7997,7 @@ mdb_rebalance(MDB_cursor *mc)
 }
 
 /** Complete a delete operation started by #mdb_cursor_del(). */
-static int
-mdb_cursor_del0(MDB_cursor *mc)
+static int mdb_cursor_del0(MDB_cursor *mc)
 {
 	int rc;
 	MDB_page *mp;

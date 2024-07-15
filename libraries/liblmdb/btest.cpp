@@ -17,7 +17,7 @@ uint64_t get_cur_us() {
 void print_free_db_item(const MDB_val*key, const MDB_val*val){
     assert(key->mv_size==8);
     uint64_t txn_id = *(uint64_t*)key->mv_data;
-    MDB_IDL idl = (MDB_IDL)val->mv_data;
+    MDB_ID* idl = (MDB_ID*)val->mv_data;
     assert(val->mv_size>=sizeof(MDB_ID));
     assert(val->mv_size % sizeof(MDB_ID) == 0);
     printf("txn id=%lu,free pages:",txn_id);
