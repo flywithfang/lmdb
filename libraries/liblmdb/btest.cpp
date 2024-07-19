@@ -196,7 +196,44 @@ int main(int argc, char** argv) {
         std::cout << "OK" << std::endl;
 
         dump_stat(env);
-    } if (strcmp(argv[0], "put_dup") == 0) {
+    }else if (strcmp(argv[0], "put_dup") == 0) {
+        if (argc < 4) {
+            std::cerr << "Missing arguments" << std::endl;
+            return 1;
+        }
+        uint64_t st = get_cur_us();
+        key.mv_data = argv[1];
+        key.mv_size = strlen(argv[1]);
+        const char *seed=argv[2];
+        const unsigned int c = atoi(argv[3]);
+        const unsigned int seed_len=strlen(seed);
+        const unsigned int n = seed_len*c;
+        char buf[1024];
+
+        rc = mdb_txn_begin(env, nullptr, 0, &txn);
+        handle_error(rc, "Failed to begin transaction");
+        MDB_cursor *mc;
+        rc = mdb_cursor_open(txn,dbi,&mc);
+        handle_error(rc, "Failed to create cursor");
+        for(unsigned int i=0;i<c;++i){
+            snprintf(buf,sizeof(buf),"%s_%u",seed,i);
+            data.mv_data = buf;
+            data.mv_size = strlen(buf);
+            printf("%u--------set %s:%s\n",i,(char*)key.mv_data,(char*)data.mv_data);
+            rc = mdb_cursor_put(mc,&key,&data,0);
+            handle_error(rc, "Failed to put data");
+        }
+
+        mdb_cursor_close(mc);
+        rc = mdb_txn_commit(txn);
+        handle_error(rc, "Failed to commit transaction");
+
+        uint64_t et = get_cur_us();
+        std::cout << "put " << (et - st) << " us" << std::endl;
+        std::cout << "OK" << std::endl;
+
+        dump_stat(env);
+    }else if (strcmp(argv[0], "put_dup_fixed") == 0) {
         if (argc < 4) {
             std::cerr << "Missing arguments" << std::endl;
             return 1;
