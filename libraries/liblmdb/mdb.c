@@ -6479,7 +6479,7 @@ put_sub:
 			ecount = mc->mc_xcursor->mx_db.md_entries;
 			rc = _mdb_cursor_put(&mc->mc_xcursor->mx_cursor, data, &zero_data, xflags);
 			if (flags & F_SUB_DATABASE) {
-				void *db = NODEDATA(leaf_node);
+				void *db = get_node_data(leaf_node);
 				memcpy(db, &mc->mc_xcursor->mx_db, sizeof(MDB_db));
 			}
 			insert_data = mc->mc_xcursor->mx_db.md_entries - ecount;
