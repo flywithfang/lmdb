@@ -1013,14 +1013,14 @@ static inline void mdb_node_read_key(MDB_node * node, MDB_val *key)	{
 }
 	/** Information about a single database in the environment. */
 typedef struct MDB_db {
-	uint32_t	m_leaf2_element_size;		/**< also ksize for LEAF2 pages */
-	uint16_t	md_flags;	/**< @ref mdb_dbi_open */
-	uint16_t	md_depth;	/**< depth of this tree */
-	pgno_t		md_branch_pages;	/**< number of internal pages */
-	pgno_t		md_leaf_pages;		/**< number of leaf_node pages */
-	pgno_t		md_overflow_pages;	/**< number of overflow pages */
-	mdb_size_t	md_entries;		/**< number of data items */
-	pgno_t		md_root;		/**< the root page of this tree */
+	uint32_t			m_leaf2_element_size;		/**< also ksize for LEAF2 pages */
+	uint16_t			md_flags;	/**< @ref mdb_dbi_open */
+	uint16_t			md_depth;	/**< depth of this tree */
+	pgno_t				md_branch_pages;	/**< number of internal pages */
+	pgno_t				md_leaf_pages;		/**< number of leaf_node pages */
+	pgno_t				md_overflow_pages;	/**< number of overflow pages */
+	mdb_size_t		md_entries;		/**< number of data items */
+	pgno_t				md_root;		/**< the root page of this tree */
 } MDB_db;
 
 #define MDB_VALID	0x8000		/**< DB handle is valid, for me_dbflags */
@@ -6019,6 +6019,27 @@ static int _mdb_cursor_put_simple(MDB_cursor *mc, MDB_val *key, MDB_val *data, u
 return rc;
 	
 }
+static inline int __new_dup_sub_db(MDB_cursor* mc, MDB_val*key,MDB_val*data, unsigned int flags,bool insert_key){
+	MDB_env * env= mc->mc_txn->mt_env;
+	unsigned int node_flags = flags & NODE_ADD_FLAGS;//(F_DUPDATA|F_SUB_DATABASE|MDB_RESERVE)
+	int rc=MDB_SUCCESS;
+	const size_t nsize = IS_LEAF2(mc->mc_pg[mc->mc_top]) ? key->mv_size : mdb_leaf_size(env, key, data);
+	if (SIZELEFT(mc->mc_pg[mc->mc_top]) < nsize) {
+		if (!insert_key)
+			node_flags |= MDB_SPLIT_REPLACE;
+		rc = mdb_page_split_insert(mc, key, data, P_INVALID, node_flags);
+	} else {
+		/* There is room already in this leaf_node page. */
+		rc = mdb_insert_node(mc, mc->mc_ki[mc->mc_top], key, data, 0/*gpno*/, node_flags);
+		if (rc != MDB_SUCCESS) {
+				mc->mc_txn->txn_flags |= MDB_TXN_ERROR;
+		}else{
+				/* Adjust other cursors pointing to mp */
+				__adjust_invalidated_cursors(mc,insert_key);
+		}
+	}
+	return rc;
+}
 static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned int flags)
 {
 	DKBUF;
@@ -6041,12 +6062,12 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 		print_data(true,data);
 	}
 
-	bool insert_key, insert_data;
+	bool insert_key;
 	if (flags & MDB_CURRENT) {
 		if (!(mc->mc_flags & C_INITIALIZED))
 			return EINVAL;
 		rc = MDB_SUCCESS;
-		insert_key = insert_data=false;
+		insert_key = false;
 
 	} else if (mc->mc_db->md_root == P_INVALID) {
 		/* new database, cursor has nothing to point to */
@@ -6068,7 +6089,7 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 		if ((mc->mc_db->md_flags & (MDB_DUPSORT|MDB_DUPFIXED)) == MDB_DUPFIXED)
 			root_page->mp_flags |= P_LEAF2;
 		mc->mc_flags |= C_INITIALIZED;
-		insert_key = insert_data=true;
+		insert_key = true;
 	} else {
 		int exact = 0;
 		MDB_val d2;
@@ -6080,7 +6101,7 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 		}
 		if (rc!=MDB_SUCCESS && rc != MDB_NOTFOUND)
 			return rc;
-		insert_key = insert_data = rc==MDB_NOTFOUND;
+		insert_key =  rc==MDB_NOTFOUND;
 	}
 
 	if (mc->mc_flags & C_DEL)
@@ -6154,10 +6175,12 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 			}
 			xdata.mv_size = sizeof(dummy_db);
 			xdata.mv_data = &dummy_db;
-			rdata = &xdata;
-	
-			do_sub = 1;
-			goto new_sub;
+			rc = __new_dup_sub_db(mc,key,&xdata,flags,insert_key);
+			if(rc !=MDB_SUCCESS){
+					mc->mc_txn->txn_flags |= MDB_TXN_ERROR;
+					return rc;
+			}
+			goto put_sub;
 
 		}
 	} else {//existing node
@@ -6259,8 +6282,16 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 
 				xdata.mv_size = olddata.mv_size + offset;
 			}
-
-			fp_flags = MP_FLAGS(sub_page);
+/*
+new key: subpage or sub_db
+existing: 
+	single -> sub page
+	single -> sub db
+	subpage-> sub_db
+	subpage insert
+	sub_db insert
+*/
+			fp_flags = sub_page->mp_flags;
 			if (NODESIZE + NODEKSZ(leaf_node) + xdata.mv_size > env->me_nodemax) {
 					/* Too big for a sub-page, convert to sub-DB */
 					fp_flags &= ~P_SUBP;
@@ -6329,8 +6360,7 @@ current:
 
 			/* Is the ov page large enough? */
 			if (ovf_page_count >= dpages) {
-			  if (!(omp->mp_flags & P_DIRTY) &&
-				  (level || (env->me_flags & MDB_WRITEMAP)))
+			  if (!(omp->mp_flags & P_DIRTY) && (level || (env->me_flags & MDB_WRITEMAP)))
 			  {
 				rc = mdb_page_unspill(mc->mc_txn, omp, &omp);
 				if (rc)
@@ -6343,35 +6373,7 @@ current:
 				 * bother to try shrinking the page if the new data
 				 * is smaller than the overflow threshold.
 				 */
-				if (level > 1) {
-					/* It is writable only in a parent txn */
-					size_t sz = (size_t) env->me_psize * ovf_page_count, off;
-					MDB_PageHeader *np = mdb_page_malloc(mc->mc_txn, ovf_page_count);
-					MDB_ID2 id2;
-					if (!np)
-						return ENOMEM;
-					id2.mid = pg;
-					id2.mptr = np;
-					/* Note - this page is already counted in parent's dirty_room */
-					rc2 = mdb_mid2l_insert(mc->mc_txn->mt_u.dirty_list, &id2);
-					mdb_cassert(mc, rc2 == 0);
-					/* Currently we make the page look as with put() in the
-					 * parent txn, in case the user peeks at MDB_RESERVEd
-					 * or unused parts. Some users treat ovf_page_count specially.
-					 */
-					if (!(flags & MDB_RESERVE)) {
-						/* Skip the part where LMDB will put *data.
-						 * Copy end of page, adjusting alignment so
-						 * compiler may copy words instead of bytes.
-						 */
-						off = (PAGEHDRSZ + data->mv_size) & -(int)sizeof(size_t);
-						memcpy((size_t *)((char *)np + off),
-							(size_t *)((char *)omp + off), sz - off);
-						sz = PAGEHDRSZ;
-					}
-					memcpy(np, omp, sz); /* Copy beginning of page */
-					omp = np;
-				}
+			
 				SETDSZ(leaf_node, data->mv_size);
 				if (F_ISSET(flags, MDB_RESERVE))
 					data->mv_data = PAGE_DATA(omp);
@@ -6407,26 +6409,7 @@ new_ksize:
 	rdata = data;
 
 new_sub:
-	nflags = flags & NODE_ADD_FLAGS;
-	const size_t nsize = IS_LEAF2(mc->mc_pg[mc->mc_top]) ? key->mv_size : mdb_leaf_size(env, key, rdata);
-	if (SIZELEFT(mc->mc_pg[mc->mc_top]) < nsize) {
-		if (( flags & (F_DUPDATA|F_SUB_DATABASE)) == F_DUPDATA )
-			nflags &= ~MDB_APPEND; /* sub-page may need room to grow */
-		if (!insert_key)
-			nflags |= MDB_SPLIT_REPLACE;
-		rc = mdb_page_split_insert(mc, key, rdata, P_INVALID, nflags);
-	} else {
-		/* There is room already in this leaf_node page. */
-		rc = mdb_insert_node(mc, mc->mc_ki[mc->mc_top], key, rdata, 0/*gpno*/, nflags);
-		if (rc != MDB_SUCCESS) {
-				mc->mc_txn->txn_flags |= MDB_TXN_ERROR;
-				return rc;
-		}else{
-				/* Adjust other cursors pointing to mp */
-				__adjust_invalidated_cursors(mc,insert_key);
-		}
-	}
-
+	rc = __new_dup_sub_db(mc,key,rdata,flags,insert_key);
 	if (rc == MDB_SUCCESS) {
 		/* Now store the actual data in the child DB. Note that we're
 		 * storing the user data in the keys field, so there are strict
@@ -6482,23 +6465,24 @@ put_sub:
 				void *db = get_node_data(leaf_node);
 				memcpy(db, &mc->mc_xcursor->mx_db, sizeof(MDB_db));
 			}
-			insert_data = mc->mc_xcursor->mx_db.md_entries - ecount;
-		}
-		/* Increment count unless we just replaced an existing item. */
-		if (insert_data)
-			mc->mc_db->md_entries++;
-		if (insert_key) {
-			/* Invalidate txn if we created an empty sub-DB */
-			if (rc)
-				goto bad_sub;
-			/* If we succeeded and the key didn't exist before,
-			 * make sure the cursor is marked valid.
-			 */
-			mc->mc_flags |= C_INITIALIZED;
-			print_cursor(mc,__FUNCTION__,__LINE__);
-		}
+			const bool insert_data = mc->mc_xcursor->mx_db.md_entries - ecount;
+					/* Increment count unless we just replaced an existing item. */
+			if (insert_data)
+				mc->mc_db->md_entries++;
+			if (insert_key) {
+				/* Invalidate txn if we created an empty sub-DB */
+				if (rc)
+					goto bad_sub;
+				/* If we succeeded and the key didn't exist before,
+				 * make sure the cursor is marked valid.
+				 */
+				mc->mc_flags |= C_INITIALIZED;
+				print_cursor(mc,__FUNCTION__,__LINE__);
+			}
 
 		return rc;
+		}
+
 bad_sub:
 		if (rc == MDB_KEYEXIST)	/* should not happen, we deleted that item */
 			rc = MDB_PROBLEM;
