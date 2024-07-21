@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
         std::cout << "OK" << std::endl;
 
         dump_stat(env);
-    } if (strcmp(argv[0], "put_big") == 0) {
+    }else if (strcmp(argv[0], "put_big") == 0) {
         if (argc < 4) {
             std::cerr << "Missing arguments" << std::endl;
             return 1;
