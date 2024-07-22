@@ -1472,8 +1472,7 @@ static MDB_cmp_func	mdb_cmp_memn, mdb_cmp_memnr, mdb_cmp_int, mdb_cmp_cint, mdb_
 
 /** True if we need #mdb_cmp_clong() instead of \b cmp for #MDB_INTEGERDUP */
 #define NEED_CMP_CLONG(cmp, ksize) \
-	(UINT_MAX < MDB_SIZE_MAX && \
-	 (cmp) == mdb_cmp_int && (ksize) == sizeof(mdb_size_t))
+	( (cmp) == mdb_cmp_int && (ksize) == sizeof(mdb_size_t))
 
 
 
@@ -2220,7 +2219,7 @@ int __try_alloc_from_free_page_db(MDB_txn *txn, const int num, 	MDB_PageHeader *
 								assert(free_page_count>=num);
 
 								mp->mp_pgno=pgno;
-								DPRINTF(("from free db:snapshot_id:%zu,pgno %zu,num:%u, rest:%u",last_snapshot_id,pgno,num,free_page_count-num));
+//								DPRINTF(("from free db:snapshot_id:%zu,pgno %zu,num:%u, rest:%u",last_snapshot_id,pgno,num,free_page_count-num));
 								*np=mp;
 							return MDB_SUCCESS;
 					}
@@ -2876,7 +2875,7 @@ int mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **r
 	} else {
 		txn->txn_flags |= flags;	/* could not change txn=me_txn0 earlier */
 		*ret = txn;
-		DPRINTF(("begin txn %zu %c , main root page %zu",
+		DPRINTF(("begin txn %zu %c, main root page %zu",
 			txn->m_snapshot_id, (flags & MDB_RDONLY) ? 'r' : 'w',
 			 txn->mt_dbs[MAIN_DBI].md_root));
 	}
@@ -4678,8 +4677,10 @@ static MDB_node * mdb_node_search_in_page(MDB_cursor *mc, const MDB_val *key, in
 
 	if (rc > 0) {	/* Found entry is less than the key. */
 		i++;	/* Skip to get the smallest entry larger than key. */
-		if (!IS_LEAF2(mp))
-			node = get_node_n(mp, i);
+		if (!IS_LEAF2(mp)){
+			assert(i<=n);
+			node = i==n? NULL: get_node_n(mp, i);
+		}
 	}
 	if (exactp)
 		*exactp = (rc == 0 && n > 0);
@@ -4698,7 +4699,7 @@ void print_cursor(MDB_cursor*mc,const char * func_name,int line){
 	#if defined(MDB_DEBUG)
 	printf("cursor stack db:%d,%s:%d:\n",mc->mc_dbi,func_name,line);
 	for( int k=mc->mc_top;k>=0;--k){
-		printf(" page %lu:%u",mc->mc_pg[k]->mp_pgno,mc->mc_ki[k]);
+		printf(" page %lu:%u:%d",mc->mc_pg[k]->mp_pgno,mc->mc_ki[k], (mc->mc_pg[k]->mp_flags&P_DIRTY)!=0);
 		if(k>0)
 			printf("->");
 	}
@@ -4792,7 +4793,6 @@ static int mdb_page_get(MDB_txn *txn, pgno_t pgno, MDB_PageHeader **ret, int *lv
 	}
 
 	level = 0;
-
 	*ret  = (MDB_PageHeader *)(env->m_shmem_data_file + env->me_psize * pgno);
 	if (lvl)
 		*lvl = level;
@@ -4965,7 +4965,6 @@ static int mdb_relocate_cursor(MDB_cursor *mc, const MDB_val *key, int flags)
 		DPUTS("tree is empty");
 		return MDB_NOTFOUND;
 	}
-
 	mdb_cassert(mc, root > 1);
 	if (!mc->mc_pg[0] || mc->mc_pg[0]->mp_pgno != root) {
 		if ((rc = mdb_page_get(mc->mc_txn, root, &mc->mc_pg[0], NULL)) != 0)
@@ -6196,6 +6195,8 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 			}
 			goto put_sub;
 
+		}else{
+			return _mdb_cursor_put_simple(mc,key,data,flags,insert_key);
 		}
 	} else {//existing node
 		/* there's only a key anyway, so this is a no-op */
@@ -6226,13 +6227,11 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 
 			/* Was a single item before, must convert now */
 			if (!F_ISSET(leaf_node->mn_flags, F_DUPDATA)) {
-				MDB_cmp_func *dcmp;
+				
 				/* Just overwrite the current item */
 				if (flags == MDB_CURRENT)
 					goto current;
-				dcmp = mc->mc_dbx->md_dcmp;
-				if (NEED_CMP_CLONG(dcmp, olddata.mv_size))
-					dcmp = mdb_cmp_clong;
+				MDB_cmp_func * const dcmp = mc->mc_dbx->md_dcmp; assert(dcmp==mdb_cmp_long);
 				/* does data match? */
 				if (!dcmp(data, &olddata)) {
 					if (flags & (MDB_NODUPDATA))
@@ -6271,7 +6270,7 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 					/* FALLTHRU */ /* Big enough MDB_DUPFIXED sub-page */
 				case MDB_CURRENT:
 						sub_page->mp_flags |= P_DIRTY;
-						sub_page->mp_pgno =  mp->mp_pgno; //MP_PGNO(mp);
+						sub_page->mp_pgno =  mc->mc_pg[mc->mc_top]->mp_pgno; //MP_PGNO(mp);
 						mc->mc_xcursor->mx_cursor.mc_pg[0] = sub_page;
 						flags |= F_DUPDATA;
 						goto put_sub;
@@ -6428,7 +6427,7 @@ put_sub:
 			MDB_val zero_data; zero_data.mv_size=0; zero_data.mv_data="";
 			//refresh the node pointer..
 			leaf_node = get_node_n(mc->mc_pg[mc->mc_top], mc->mc_ki[mc->mc_top]);
-			if ((flags & (MDB_CURRENT)) == MDB_CURRENT) {
+			if ((flags & MDB_CURRENT) == MDB_CURRENT) {
 				xflags = MDB_CURRENT|MDB_NOSPILL;
 			} else {
 				mdb_xcursor_init1(mc, leaf_node);
@@ -6984,6 +6983,7 @@ static void mdb_xcursor_init1(MDB_cursor *mc, MDB_node *node)
 	mx->mx_cursor.mc_flags &= C_SUB|MDB_TXN_RDONLY;
 	if (node->mn_flags & F_SUB_DATABASE) {
 		memcpy(&mx->mx_db, NODEDATA(node), sizeof(MDB_db));
+		assert(mx->mx_db.md_root);
 		mx->mx_cursor.mc_pg[0] = 0;
 		mx->mx_cursor.mc_snum = 0;
 		mx->mx_cursor.mc_top = 0;
@@ -9186,7 +9186,7 @@ static void mdb_init_default_cmp(MDB_txn *txn, MDB_dbi dbi)
 	txn->mt_dbxs[dbi].md_dcmp =
 		!(f & MDB_DUPSORT) ? 0 :
 		((f & MDB_INTEGERDUP)
-		 ? ((f & MDB_DUPFIXED)   ? mdb_cmp_int   : mdb_cmp_cint)
+		 ? ((f & MDB_DUPFIXED)   ? mdb_cmp_long   : mdb_cmp_cint)
 		 : ((f & MDB_REVERSEDUP) ? mdb_cmp_memnr : mdb_cmp_memn));
 }
 
