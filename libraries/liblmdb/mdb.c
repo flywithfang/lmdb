@@ -6040,6 +6040,20 @@ static inline int __new_dup_sub_db(MDB_cursor* mc, MDB_val*key,MDB_val*data, uns
 	}
 	return rc;
 }
+/*
+new key: subpage or sub_db
+existing: 
+	single -> sub page
+	single -> sub db
+	subpage-> sub_db
+	subpage insert
+	sub_db insert
+
+in short:
+sub page put
+sub db put
+*/
+
 static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned int flags)
 {
 	DKBUF;
@@ -6282,16 +6296,7 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 
 				xdata.mv_size = olddata.mv_size + offset;
 			}
-/*
-new key: subpage or sub_db
-existing: 
-	single -> sub page
-	single -> sub db
-	subpage-> sub_db
-	subpage insert
-	sub_db insert
-*/
-			fp_flags = sub_page->mp_flags;
+		fp_flags = sub_page->mp_flags;
 			if (NODESIZE + NODEKSZ(leaf_node) + xdata.mv_size > env->me_nodemax) {
 					/* Too big for a sub-page, convert to sub-DB */
 					fp_flags &= ~P_SUBP;
@@ -6998,18 +7003,19 @@ static void mdb_xcursor_init1(MDB_cursor *mc, MDB_node *node)
 		mx->mx_db.md_overflow_pages = 0;
 		mx->mx_db.md_entries = get_page_keys_count(sub_page);//NUMKEYS(sub_page);
 		mx->mx_db.md_root = sub_page->mp_pgno;
-
-		mx->mx_cursor.mc_snum = 1;
-		mx->mx_cursor.mc_top = 0;
-		mx->mx_cursor.mc_flags |= C_INITIALIZED;
-		mx->mx_cursor.mc_pg[0] = sub_page;
-		mx->mx_cursor.mc_ki[0] = 0;
 		if (mc->mc_db->md_flags & MDB_DUPFIXED) {
 			mx->mx_db.md_flags = MDB_DUPFIXED;
 			mx->mx_db.m_leaf2_element_size = sub_page->m_leaf2_element_size;
 			if (mc->mc_db->md_flags & MDB_INTEGERDUP)
 				mx->mx_db.md_flags |= MDB_INTEGERKEY;
 		}
+
+		mx->mx_cursor.mc_snum = 1;
+		mx->mx_cursor.mc_top = 0;
+		mx->mx_cursor.mc_flags |= C_INITIALIZED;
+		mx->mx_cursor.mc_pg[0] = sub_page;
+		mx->mx_cursor.mc_ki[0] = 0;
+
 		DPRINTF(("sub-page: db:%u root page: %zu, entries:%zu", mx->mx_cursor.mc_dbi,mx->mx_db.md_root,	mx->mx_db.md_entries));
 	}else{
 		assert(false);
