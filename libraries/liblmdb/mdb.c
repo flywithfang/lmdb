@@ -5930,7 +5930,7 @@ static int _mdb_cursor_put_simple(MDB_cursor *mc, MDB_val *key, MDB_val *data, u
 		//update existing
 		MDB_val olddata;
 		olddata.mv_size = get_node_data_size(leaf_node);
-		olddata.mv_data = NODEDATA(leaf_node);
+		olddata.mv_data = get_node_data(leaf_node);
 				/* overflow page overwrites need special handling */
 		if (F_ISSET(leaf_node->mn_flags, F_BIGDATA)) {
 
@@ -6039,6 +6039,152 @@ static inline int __new_dup_sub_db(MDB_cursor* mc, MDB_val*key,MDB_val*data, uns
 	}
 	return rc;
 }
+static inline void __copy_subpage_to_temporary_page(){
+}
+static int subpage_to_subdb(MDB_cursor * mc, MDB_PageHeader *sub_page, unsigned int sub_page_size, MDB_db*dummy_db ){
+	int rc=MDB_SUCCESS;
+	MDB_env * env = mc->mc_txn->mt_env;
+	unsigned int page_flags = sub_page->mp_flags;
+	/* Too big for a sub-page, convert to sub-DB */
+	fp_flags &= ~P_SUBP;
+
+	if (mc->mc_db->md_flags & MDB_DUPFIXED) {
+		fp_flags |= P_LEAF2;
+	}
+
+	MDB_PageHeader * root_page;
+	if ((rc = mdb_page_alloc(mc->mc_txn, DDBI(mc), 1, &root_page)))
+		return rc;
+	//lower upper offsets  data
+	//lower upper offsets  data
+	root_page->mp_flags = fp_flags | P_DIRTY;
+	root_page->m_leaf2_element_size   = sub_page->m_leaf2_element_size;
+	root_page->mp_lower = sub_page->mp_lower;
+	unsigned int old_node_heap_size = sub_page_size - sub_page->mp_upper;
+	root_page->mp_upper =env->me_psize - old_node_heap_size;
+	const unsigned int n = get_page_keys_count(sub_page);
+	if (fp_flags & P_LEAF2) {
+		memcpy(PAGE_DATA(mp), PAGE_DATA(sub_page), n * sub_page->m_leaf2_element_size);
+	} else {
+		// lower  upper nnnn
+		memcpy((char *)mp + mp->mp_upper , (char *)sub_page + sub_page->mp_upper,old_node_heap_size);
+		memcpy((char *)mp->offsets, (char *)sub_page->offsets,n * sizeof(mp->offsets[0]));
+		const unsigned offset = env->me_psize-sub_page_size;
+		for (i=0; i<n; i++)
+			root_page->offsets[i] += offset;
+	}
+		
+		if (mc->mc_db->md_flags & MDB_DUPFIXED) {
+			dummy_db.m_leaf2_element_size = sub_page->m_leaf2_element_size;
+			dummy_db.md_flags = MDB_DUPFIXED;
+			if (mc->mc_db->md_flags & MDB_INTEGERDUP)
+				dummy_db.md_flags |= MDB_INTEGERKEY;
+		} else {
+			dummy_db->m_leaf2_element_size = 0;
+			dummy_db->md_flags = 0;
+		}
+		dummy_db->md_depth = 1;
+		dummy_db->md_branch_pages = 0;
+		dummy_db->md_leaf_pages = 1;
+		dummy_db->md_overflow_pages = 0;
+		dummy_db.md_entries = n;
+		dummy_db.md_root = root_page->mp_pgno;
+
+		flags |= F_DUPDATA|F_SUB_DATABASE;
+	
+		sub_root = root_page;
+		return rc;
+}
+
+
+static int node_to_subpage(MDB_cursor*mc, MDB_node* leaf_node, MDB_PageHeader* sub_page){
+	int rc=MDB_SUCCESS;
+	assert((leaf_node->mn_flags&F_BIGDATA)==0);
+
+	/* Back up original data item */
+	dkey.mv_size = 	olddata.mv_size;
+	dkey.mv_data = memcpy(sub_page+1, olddata.mv_data,	olddata.mv_size );
+
+	/* Make sub-page header for the dup items, with dummy_db body */
+	sub_page->mp_flags = P_LEAF|P_DIRTY|P_SUBP;
+	sub_page->mp_lower = PAGEHDRSZ;
+	unsigned int sub_page_size = 0 ;
+	if (mc->mc_db->md_flags & MDB_DUPFIXED) {
+		sub_page->mp_flags |= P_LEAF2;
+		sub_page->m_leaf2_element_size = data->mv_size;
+		sub_page_size = PAGEHDRSZ + get_node_data_size(leaf_node) + data->mv_size + 2 * data->mv_size;	/* leave space for 2 more */
+	} else {
+		sub_page_size = PAGEHDRSZ+ 2*(sizeof(indx_t) + __node_header_size) +get_node_data_size(leaf_node) + data->mv_size+ (get_node_data_size(leaf_node) & 1) + (data->mv_size & 1);
+	}
+	sub_page->mp_upper 	  = sub_page_size;
+	return rc;
+}
+
+static void write_sub(MDB_cursor*mc,unsigned int flags){
+	MDB_val zero_data; zero_data.mv_size=0; zero_data.mv_data="";
+	//refresh the node pointer..
+	MDB_node * const leaf_node = get_node_n(mc->mc_pg[mc->mc_top], mc->mc_ki[mc->mc_top]);
+	unsigned xflags;
+	if ((flags & MDB_CURRENT) == MDB_CURRENT) {
+		xflags = MDB_CURRENT|MDB_NOSPILL;
+	} else {
+		mdb_xcursor_init1(mc, leaf_node);
+		xflags = (flags & MDB_NODUPDATA) ? MDB_NOOVERWRITE|MDB_NOSPILL : MDB_NOSPILL;
+	}
+	if (sub_root)
+		mc->mc_xcursor->mx_cursor.mc_pg[0] = sub_root;
+	new_dupdata = (int)dkey.mv_size;
+	/* converted, write the original data first */
+	if (dkey.mv_size) {
+		rc = _mdb_cursor_put(&mc->mc_xcursor->mx_cursor, &dkey, &zero_data, xflags);
+		if (rc)
+			goto bad_sub;
+		/* we've done our job */
+		dkey.mv_size = 0;
+	}
+	if (!(leaf_node->mn_flags & F_SUB_DATABASE) || sub_root) {
+		/* Adjust other cursors pointing to mp */
+		MDB_cursor *m2;
+		MDB_xcursor *const mx = mc->mc_xcursor;
+		const unsigned i = mc->mc_top;
+		MDB_PageHeader *const mp = mc->mc_pg[i];
+
+		for (m2 = mc->mc_txn->mt_cursors[mc->mc_dbi]; m2; m2=m2->mc_next) {
+			if (m2 == mc || m2->mc_snum < mc->mc_snum) continue;
+			if (!(m2->mc_flags & C_INITIALIZED)) continue;
+			if (m2->mc_pg[i] == mp) {
+				if (m2->mc_ki[i] == mc->mc_ki[i]) {
+					mdb_xcursor_init2(m2, mx, new_dupdata);
+				} else if (!insert_key) {
+					__refresh_xcursor(m2,i,mp);
+				}
+			}
+		}
+	}
+	ecount = mc->mc_xcursor->mx_db.md_entries;
+	rc = _mdb_cursor_put(&mc->mc_xcursor->mx_cursor, data, &zero_data, xflags);
+	if (flags & F_SUB_DATABASE) {
+		void *db = get_node_data(leaf_node);
+		memcpy(db, &mc->mc_xcursor->mx_db, sizeof(MDB_db));
+	}
+	const bool insert_data = mc->mc_xcursor->mx_db.md_entries - ecount;
+			/* Increment count unless we just replaced an existing item. */
+	if (insert_data)
+		mc->mc_db->md_entries++;
+	if (insert_key) {
+		/* Invalidate txn if we created an empty sub-DB */
+		if (rc)
+			goto bad_sub;
+		/* If we succeeded and the key didn't exist before,
+		 * make sure the cursor is marked valid.
+		 */
+		mc->mc_flags |= C_INITIALIZED;
+		print_cursor(mc,__FUNCTION__,__LINE__);
+	}
+
+return rc;
+
+}
 /*
 new key: subpage or sub_db
 existing: 
@@ -6052,7 +6198,6 @@ in short:
 sub page put
 sub db put
 */
-
 static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned int flags)
 {
 	DKBUF;
@@ -6235,6 +6380,7 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 				/* Just overwrite the current item */
 				if (flags == MDB_CURRENT)
 					goto current;
+
 				assert((leaf_node->mn_flags&F_BIGDATA)==0);
 				MDB_cmp_func * const dcmp = mc->mc_dbx->md_dcmp; assert(dcmp==mdb_cmp_long);
 				/* does data match? */
@@ -6248,19 +6394,8 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 				/* Back up original data item */
 				dkey.mv_size = 	olddata.mv_size;
 				dkey.mv_data = memcpy(sub_page+1, olddata.mv_data,	olddata.mv_size );
-
-				/* Make sub-page header for the dup items, with dummy_db body */
-				sub_page->mp_flags = P_LEAF|P_DIRTY|P_SUBP;
-				sub_page->mp_lower = PAGEHDRSZ;
-				unsigned int mv_size = 0 ;
-				if (mc->mc_db->md_flags & MDB_DUPFIXED) {
-					sub_page->mp_flags |= P_LEAF2;
-					sub_page->m_leaf2_element_size = data->mv_size;
-					mv_size = PAGEHDRSZ + get_node_data_size(leaf_node) + data->mv_size + 2 * data->mv_size;	/* leave space for 2 more */
-				} else {
-					mv_size = PAGEHDRSZ + 2*(sizeof(indx_t) + __node_header_size) +get_node_data_size(leaf_node) + data->mv_size+ (get_node_data_size(leaf_node) & 1) + (data->mv_size & 1);
-				}
-				sub_page->mp_upper 	  = mv_size;
+				rc =node_to_subpage(mc,leaf_node,sub_page);
+				if(rc!=MDB_SUCCESS) return rc;
 				xdata.mv_size   = mv_size;
 				olddata.mv_size = mv_size; /* pretend olddata is sub_page */
 			} else{
@@ -6281,7 +6416,7 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 							xdata.mv_size = get_node_data_size(leaf_node) + EVEN(__node_header_size + sizeof(indx_t) + data->mv_size);
 						}else {
 						
-							if (SIZELEFT(sub_page) < sub_page->m_leaf2_element_size) {
+							if (get_page_left_size(sub_page) < sub_page->m_leaf2_element_size) {
 								 /* space for 4 more */
 								xdata.mv_size = get_node_data_size(leaf_node) +  4*sub_page->m_leaf2_element_size;
 							}else{
@@ -6300,34 +6435,11 @@ static int _mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data, unsigned
 			fp_flags = sub_page->mp_flags;
 			if (__node_header_size + NODEKSZ(leaf_node) + xdata.mv_size > env->me_nodemax) {
 					/* Too big for a sub-page, convert to sub-DB */
-					fp_flags &= ~P_SUBP;
-
-					if (mc->mc_db->md_flags & MDB_DUPFIXED) {
-						fp_flags |= P_LEAF2;
-						dummy_db.m_leaf2_element_size = sub_page->m_leaf2_element_size;
-						dummy_db.md_flags = MDB_DUPFIXED;
-						if (mc->mc_db->md_flags & MDB_INTEGERDUP)
-							dummy_db.md_flags |= MDB_INTEGERKEY;
-					} else {
-						dummy_db.m_leaf2_element_size = 0;
-						dummy_db.md_flags = 0;
-					}
-					dummy_db.md_depth = 1;
-					dummy_db.md_branch_pages = 0;
-					dummy_db.md_leaf_pages = 1;
-					dummy_db.md_overflow_pages = 0;
-					dummy_db.md_entries = get_page_keys_count(sub_page);
-					xdata.mv_size = sizeof(dummy_db);
-					xdata.mv_data = &dummy_db;
-					if ((rc = mdb_page_alloc(mc->mc_txn, DDBI(mc), 1, &mp)))
-						return rc;
-					const unsigned int offset = env->me_psize - olddata.mv_size;
-					flags |= F_DUPDATA|F_SUB_DATABASE;
-					dummy_db.md_root = mp->mp_pgno;
+					rc = subpage_to_subdb(mc,sub_page,xdata.mv_size,&dummy_db);
+					if(rc!=MDB_SUCCESS) return rc;
 					sub_root = mp;
-				}
-				if(mp!=sub_page){
-			
+				}else if(mp!=sub_page){
+				  //converted sub_page, existing sub page
 					mp->mp_flags = fp_flags | P_DIRTY;
 					mp->m_leaf2_element_size   = sub_page->m_leaf2_element_size;
 					mp->mp_lower = sub_page->mp_lower;
